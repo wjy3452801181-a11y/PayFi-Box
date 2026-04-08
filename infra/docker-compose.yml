@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: docker.m.daocloud.io/library/postgres:16
+    container_name: payfi-box-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: payfi_box
+      POSTGRES_USER: payfi
+      POSTGRES_PASSWORD: payfi
+    ports:
+      - "5432:5432"
+    volumes:
+      - payfi_box_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payfi -d payfi_box"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  payfi_box_postgres_data:

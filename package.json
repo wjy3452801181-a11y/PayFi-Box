@@ -1,0 +1,32 @@
+{
+  "name": "payfi-box",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/web",
+    "packages/shared"
+  ],
+  "scripts": {
+    "dev:web": "npm --workspace apps/web run dev",
+    "build:web": "npm --workspace apps/web run build",
+    "start:web": "npm --workspace apps/web run start",
+    "dev:api": "cd apps/api && env -u DATABASE_URL ../../.venv/bin/python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000",
+    "dev:db": "make db",
+    "db:down": "make db-down",
+    "dev:db:docker": "docker compose -f infra/docker-compose.yml up -d",
+    "db:down:docker": "docker compose -f infra/docker-compose.yml down",
+    "db:migrate": "cd apps/api && env -u DATABASE_URL ../../.venv/bin/alembic upgrade head",
+    "db:seed": "cd apps/api && env -u DATABASE_URL ../../.venv/bin/python scripts/seed_demo_data.py",
+    "db:reset": "cd apps/api && env -u DATABASE_URL ../../.venv/bin/python scripts/reset_demo_data.py",
+    "dev:all": "concurrently -k -n web,api -c cyan,green \"npm run dev:web\" \"npm run dev:api\"",
+    "lint": "npm run lint:web && npm run lint:api",
+    "lint:web": "npm --workspace apps/web run lint",
+    "lint:api": "./.venv/bin/python -m compileall apps/api/app",
+    "test": "npm run test:web && npm run test:api",
+    "test:web": "node -e \"console.log('Web test placeholder: add Vitest or Playwright in step 2.')\"",
+    "test:api": "node -e \"console.log('API test placeholder: add pytest suites in step 2.')\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
