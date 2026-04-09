@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense } from "react";
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { postAccessSession, rememberAccessSession } from "../../lib/api";
@@ -13,6 +13,21 @@ const DEFAULT_EMAILS = [
   "wang.analyst@payfi.demo",
 ];
 
+const LOCAL_TEST_ACCOUNTS = [
+  {
+    email: "lin.retail@payfi.demo",
+    accessCode: "payfi-355164-636135",
+  },
+  {
+    email: "chen.trade@payfi.demo",
+    accessCode: "payfi-0fc39b-add263",
+  },
+  {
+    email: "wang.analyst@payfi.demo",
+    accessCode: "payfi-d63fb1-a21f84",
+  },
+] as const;
+
 function AccessPageContent() {
   const { lang } = useI18n();
   const router = useRouter();
@@ -22,6 +37,12 @@ function AccessPageContent() {
   const [accessCode, setAccessCode] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showLocalAccounts, setShowLocalAccounts] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setShowLocalAccounts(["127.0.0.1", "localhost"].includes(window.location.hostname));
+  }, []);
 
   const copy = useMemo(
     () =>
@@ -35,6 +56,9 @@ function AccessPageContent() {
             submit: "进入平台",
             helper: "本地 seed 账号邮箱已预填；访问码使用当前环境生成的本地访问码。",
             quick: "快速选择",
+            localTitle: "本地测试账号",
+            localBody: "当前是本地环境，下面这组测试账号可直接建立访问会话。",
+            localCode: "访问码",
           }
         : {
             eyebrow: "ACCESS",
@@ -45,6 +69,9 @@ function AccessPageContent() {
             submit: "Enter platform",
             helper: "Seed account emails are prefilled for local use. Use the access code generated for the current environment.",
             quick: "Quick select",
+            localTitle: "Local test accounts",
+            localBody: "This is a local environment. The seed accounts below can be used to create an access session directly.",
+            localCode: "Access code",
           },
     [lang],
   );
@@ -133,6 +160,21 @@ function AccessPageContent() {
             ))}
           </div>
           <p className="mt-5 text-sm leading-7 text-slate-600">{copy.helper}</p>
+          {showLocalAccounts ? (
+            <div className="mt-6 rounded-[24px] border border-[#d3dded] bg-white px-4 py-4">
+              <p className="text-xs uppercase tracking-[0.24em] text-slate-400">{copy.localTitle}</p>
+              <p className="mt-2 text-sm leading-7 text-slate-600">{copy.localBody}</p>
+              <div className="mt-4 space-y-3">
+                {LOCAL_TEST_ACCOUNTS.map((account) => (
+                  <div key={account.email} className="rounded-2xl border border-[#e2e8f2] bg-[#fbfdff] px-4 py-3">
+                    <p className="text-sm font-medium text-slate-800">{account.email}</p>
+                    <p className="mt-1 text-xs uppercase tracking-[0.2em] text-slate-400">{copy.localCode}</p>
+                    <p className="mt-1 font-mono text-sm text-slate-700">{account.accessCode}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </aside>
       </section>
     </main>

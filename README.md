@@ -1,8 +1,59 @@
 # PayFi Box
 
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
+
+Stablecoin settlement infrastructure for web and AI-native clients.
+
 PayFi Box is a stablecoin settlement infrastructure for web and AI-native clients. It combines natural-language settlement initiation, fiat collection, KYC gating, platform balance management, onchain stablecoin execution, and auditable settlement detail in one product surface.
 
 PayFi Box 面向真实资金流的结算场景：用户可以通过网页或 MCP 发起结算，平台完成报价、风控、法币入金、平台余额管理、链上稳定币执行与结算核查。
+
+## Quick Start
+
+```bash
+cp .env.example .env
+cp apps/web/.env.example apps/web/.env.local
+cp apps/api/.env.example apps/api/.env
+make install
+make db
+make migrate
+make seed
+make api-start
+make web-start
+```
+
+Local URLs:
+
+- Web: [http://127.0.0.1:3000](http://127.0.0.1:3000)
+- API health: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
+- MCP endpoint: [http://127.0.0.1:8000/mcp/](http://127.0.0.1:8000/mcp/)
+
+## Why This Repo
+
+- Unified settlement backbone across merchant fiat settlement, platform balance, and MCP-driven AI workflows
+- Natural-language settlement initiation with AI guidance and route recommendation
+- KYC-gated fiat collection, Stripe checkout, and stablecoin payout on HashKey Chain Testnet
+- Auditable settlement detail with payment order, execution batch, execution items, timeline, and risk signals
+
+## System Model
+
+```mermaid
+flowchart LR
+    U1["Web users"] --> WEB["Next.js product surfaces"]
+    U2["External AI clients"] --> MCP["MCP endpoint"]
+    WEB --> API["FastAPI settlement API"]
+    MCP --> API
+
+    API --> KYC["KYC gating"]
+    API --> FIAT["Fiat collection / Stripe"]
+    API --> BAL["Platform balance accounts"]
+    API --> EXEC["Settlement execution backbone"]
+
+    EXEC --> PO["Payment order"]
+    EXEC --> EB["Execution batch"]
+    EXEC --> EI["Execution items"]
+    EXEC --> CHAIN["HashKey Chain Testnet"]
+```
 
 ## What It Does
 
@@ -211,12 +262,6 @@ Stop helpers:
 make api-stop
 make web-stop
 ```
-
-## Local URLs
-
-- Web: [http://127.0.0.1:3000](http://127.0.0.1:3000)
-- API health: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
-- MCP endpoint: [http://127.0.0.1:8000/mcp/](http://127.0.0.1:8000/mcp/)
 
 ## Environment Notes
 
