@@ -67,6 +67,7 @@ from app.modules.merchant.service import (
     _normalize_stripe_checkout_locale,
     _format_stripe_checkout_failure,
     _resolve_fx_rate,
+    _resolve_stripe_checkout_redirect_url,
     _stripe_get,
     _to_fiat_minor_units,
     _validate_stripe_secret_key,
@@ -82,14 +83,11 @@ def get_balance_account(
 ) -> PlatformBalanceAccountResponse:
     _require_user(session=session, user_id=user_id)
     normalized_currency = currency.upper().strip()
-    account = get_or_create_balance_account(
+    account = _load_balance_account(
         session=session,
         user_id=user_id,
         currency=normalized_currency,
-        lock=False,
     )
-    session.commit()
-    session.refresh(account)
     return PlatformBalanceAccountResponse(account=_to_account_view(account))
 
 
@@ -102,26 +100,28 @@ def get_balance_ledger(
 ) -> PlatformBalanceLedgerResponse:
     _require_user(session=session, user_id=user_id)
     normalized_currency = currency.upper().strip()
-    account = get_or_create_balance_account(
+    account = _load_balance_account(
         session=session,
         user_id=user_id,
         currency=normalized_currency,
-        lock=False,
     )
-    items = session.execute(
-        select(PlatformBalanceLedgerEntry)
-        .where(PlatformBalanceLedgerEntry.account_id == account.id)
-        .order_by(PlatformBalanceLedgerEntry.created_at.desc())
-        .limit(limit)
-    ).scalars().all()
-    total = int(
-        session.execute(
-            select(func.count())
-            .select_from(PlatformBalanceLedgerEntry)
+    if _is_virtual_balance_account(account):
+        items: list[PlatformBalanceLedgerEntry] = []
+        total = 0
+    else:
+        items = session.execute(
+            select(PlatformBalanceLedgerEntry)
             .where(PlatformBalanceLedgerEntry.account_id == account.id)
-        ).scalar_one()
-    )
-    session.commit()
+            .order_by(PlatformBalanceLedgerEntry.created_at.desc())
+            .limit(limit)
+        ).scalars().all()
+        total = int(
+            session.execute(
+                select(func.count())
+                .select_from(PlatformBalanceLedgerEntry)
+                .where(PlatformBalanceLedgerEntry.account_id == account.id)
+            ).scalar_one()
+        )
     return PlatformBalanceLedgerResponse(
         account=_to_account_view(account),
         total=total,
@@ -319,10 +319,22 @@ def start_deposit_stripe_payment(
         "user_id": str(deposit.user_id),
         "reference": deposit.reference,
     }
+    success_url = _resolve_stripe_checkout_redirect_url(
+        requested_url=request.success_url,
+        default_url=settings.stripe_checkout_success_url,
+        settings=settings,
+        field_name="success_url",
+    )
+    cancel_url = _resolve_stripe_checkout_redirect_url(
+        requested_url=request.cancel_url,
+        default_url=settings.stripe_checkout_cancel_url,
+        settings=settings,
+        field_name="cancel_url",
+    )
     checkout_payload: dict[str, Any] = {
         "mode": "payment",
-        "success_url": request.success_url or settings.stripe_checkout_success_url,
-        "cancel_url": request.cancel_url or settings.stripe_checkout_cancel_url,
+        "success_url": success_url,
+        "cancel_url": cancel_url,
         "line_items": [
             {
                 "price_data": {
@@ -710,12 +722,7 @@ def _build_balance_check_for_preview(
             None,
         )
 
-    account = get_or_create_balance_account(
-        session=session,
-        user_id=user_id,
-        currency=normalized_currency,
-        lock=False,
-    )
+    account = _load_balance_account(session=session, user_id=user_id, currency=normalized_currency)
     account_view = _to_account_view(account)
     required_amount = float(amount) if amount is not None else None
     sufficient = required_amount is not None and float(account.available_balance) >= required_amount
@@ -747,6 +754,44 @@ def _extract_command_amount_and_currency(command: CommandExecution) -> tuple[Dec
         amount = None
     currency = str(raw_currency).upper().strip() if raw_currency else None
     return amount, currency
+
+
+def _virtual_balance_account_id(*, user_id: UUID, currency: str) -> UUID:
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"payfi:platform_balance:{user_id}:{currency.upper().strip()}")
+
+
+def _build_virtual_balance_account(*, user_id: UUID, currency: str) -> PlatformBalanceAccount:
+    now = datetime.now(timezone.utc)
+    return PlatformBalanceAccount(
+        id=_virtual_balance_account_id(user_id=user_id, currency=currency),
+        user_id=user_id,
+        currency=currency.upper().strip(),
+        available_balance=Decimal("0"),
+        locked_balance=Decimal("0"),
+        status="active",
+        metadata_json={"virtual": True},
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _load_balance_account(session: Session, *, user_id: UUID, currency: str) -> PlatformBalanceAccount:
+    account = session.execute(
+        select(PlatformBalanceAccount)
+        .where(
+            PlatformBalanceAccount.user_id == user_id,
+            PlatformBalanceAccount.currency == currency.upper().strip(),
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+    if account is not None:
+        return account
+    return _build_virtual_balance_account(user_id=user_id, currency=currency)
+
+
+def _is_virtual_balance_account(account: PlatformBalanceAccount) -> bool:
+    metadata = account.metadata_json if isinstance(account.metadata_json, dict) else {}
+    return bool(metadata.get("virtual"))
 
 
 def _to_account_view(account: Any) -> PlatformBalanceAccountView:

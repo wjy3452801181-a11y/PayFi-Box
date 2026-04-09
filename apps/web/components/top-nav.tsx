@@ -2,6 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
+import { clearRememberedAccessSession, getRememberedAccessSession, type AccessSession } from "../lib/api";
 import { useI18n } from "../lib/i18n-provider";
 
 const LINKS = [
@@ -22,6 +24,12 @@ export function TopNav() {
   const pathname = usePathname();
   const { lang, setLang, t } = useI18n();
   const isHome = pathname === "/";
+  const [session, setSession] = useState<AccessSession | null>(null);
+
+  useEffect(() => {
+    setSession(getRememberedAccessSession());
+  }, [pathname]);
+
   return (
     <header
       className={`sticky top-0 z-30 backdrop-blur-xl ${
@@ -65,6 +73,47 @@ export function TopNav() {
               );
             })}
           </nav>
+          <div className="hidden items-center gap-2 lg:flex">
+            {session ? (
+              <>
+                <div
+                  className={`rounded-lg px-3 py-1.5 text-xs ${
+                    isHome
+                      ? "border border-white/10 bg-white/[0.04] text-slate-200"
+                      : "border border-slate-200 bg-slate-50 text-slate-600"
+                  }`}
+                >
+                  {session.user.email}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearRememberedAccessSession();
+                    setSession(null);
+                  }}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-all duration-200 ${
+                    isHome
+                      ? "text-slate-300 hover:bg-white/6 hover:text-white"
+                      : "text-slate-600 hover:bg-slate-100 hover:text-slate-950"
+                  }`}
+                >
+                  {t("nav.signOut")}
+                </button>
+              </>
+            ) : (
+              <Link
+                href="/access"
+                prefetch={false}
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-all duration-200 ${
+                  isHome
+                    ? "border border-white/12 bg-white/[0.04] text-slate-200 hover:bg-white/8 hover:text-white"
+                    : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 hover:text-slate-950"
+                }`}
+              >
+                {t("nav.access")}
+              </Link>
+            )}
+          </div>
           <div
             className={`flex items-center gap-1 rounded-lg p-1 ${
               isHome ? "border border-white/10 bg-white/[0.04]" : "border border-slate-200 bg-slate-50"

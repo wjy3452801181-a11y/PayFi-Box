@@ -6,7 +6,7 @@
     "dev": "next dev --port 3000",
     "build": "next build",
     "start": "next start --port 3000",
-    "lint": "node -e \"console.log('Web lint placeholder: add ESLint rules in step 2.')\""
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "@payfi-box/shared": "*",

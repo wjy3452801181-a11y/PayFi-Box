@@ -4,11 +4,11 @@ from decimal import Decimal
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 from web3 import Web3
 
-from app.db.models import Beneficiary, PaymentOrder
+from app.db.models import Beneficiary, PaymentOrder, User
 from app.modules.beneficiaries.schemas import (
     BeneficiaryCoreDetails,
     BeneficiaryDetailResponse,
@@ -26,6 +26,7 @@ from app.modules.risk.reason_codes import normalize_reason_codes
 def list_beneficiaries(
     session: Session,
     *,
+    actor_user: User,
     country: str | None,
     risk_level: str | None,
     is_blacklisted: bool | None,
@@ -39,6 +40,7 @@ def list_beneficiaries(
             func.count(PaymentOrder.id).label("payment_count"),
             func.max(PaymentOrder.created_at).label("latest_payment_at"),
         )
+        .where(PaymentOrder.user_id == actor_user.id)
         .group_by(PaymentOrder.beneficiary_id)
         .subquery()
     )
@@ -54,6 +56,7 @@ def list_beneficiaries(
             payment_stats_subquery.c.beneficiary_id == Beneficiary.id,
         )
     )
+    stmt = stmt.where(_beneficiary_visibility_clause(actor_user))
 
     if country:
         stmt = stmt.where(Beneficiary.country == country.upper())
@@ -94,19 +97,19 @@ def list_beneficiaries(
             for beneficiary, payment_count, latest_payment_at in rows
         ],
     )
-
-
-def get_beneficiary_detail(session: Session, beneficiary_id: UUID) -> BeneficiaryDetailResponse:
-    beneficiary = session.get(Beneficiary, beneficiary_id)
-    if beneficiary is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"beneficiary not found: {beneficiary_id}",
-        )
+def get_beneficiary_detail(session: Session, *, actor_user: User, beneficiary_id: UUID) -> BeneficiaryDetailResponse:
+    beneficiary = _require_visible_beneficiary(
+        session=session,
+        actor_user=actor_user,
+        beneficiary_id=beneficiary_id,
+    )
 
     payments = session.execute(
         select(PaymentOrder)
-        .where(PaymentOrder.beneficiary_id == beneficiary.id)
+        .where(
+            PaymentOrder.beneficiary_id == beneficiary.id,
+            PaymentOrder.user_id == actor_user.id,
+        )
         .order_by(PaymentOrder.created_at.desc())
     ).scalars().all()
 
@@ -157,14 +160,19 @@ def get_beneficiary_detail(session: Session, beneficiary_id: UUID) -> Beneficiar
 def patch_beneficiary(
     session: Session,
     *,
+    actor_user: User,
     beneficiary_id: UUID,
     request: BeneficiaryPatchRequest,
 ) -> BeneficiaryDetailResponse:
-    beneficiary = session.get(Beneficiary, beneficiary_id)
-    if beneficiary is None:
+    beneficiary = _require_visible_beneficiary(
+        session=session,
+        actor_user=actor_user,
+        beneficiary_id=beneficiary_id,
+    )
+    if actor_user.organization_id is None or beneficiary.organization_id != actor_user.organization_id:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"beneficiary not found: {beneficiary_id}",
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="only organization-scoped beneficiaries can be updated by the current actor",
         )
 
     if "wallet_address" not in request.model_fields_set:
@@ -188,7 +196,38 @@ def patch_beneficiary(
     session.add(beneficiary)
     session.commit()
     session.refresh(beneficiary)
-    return get_beneficiary_detail(session=session, beneficiary_id=beneficiary_id)
+    return get_beneficiary_detail(session=session, actor_user=actor_user, beneficiary_id=beneficiary_id)
+
+
+def _beneficiary_visibility_clause(actor_user: User):
+    if actor_user.organization_id is None:
+        return Beneficiary.organization_id.is_(None)
+    return or_(
+        Beneficiary.organization_id == actor_user.organization_id,
+        Beneficiary.organization_id.is_(None),
+    )
+
+
+def _require_visible_beneficiary(
+    *,
+    session: Session,
+    actor_user: User,
+    beneficiary_id: UUID,
+) -> Beneficiary:
+    beneficiary = session.execute(
+        select(Beneficiary)
+        .where(
+            Beneficiary.id == beneficiary_id,
+            _beneficiary_visibility_clause(actor_user),
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+    if beneficiary is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"beneficiary not found: {beneficiary_id}",
+        )
+    return beneficiary
 
 
 def _build_risk_profile(

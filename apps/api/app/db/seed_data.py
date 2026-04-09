@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.core.auth import build_seed_access_code, hash_access_code
 from app.db.models import (
     AuditLog,
     Base,
@@ -29,6 +30,7 @@ from app.db.models import (
     RiskLevel,
     SessionStatus,
     User,
+    UserAccessCredential,
     UserRole,
 )
 from app.db.session import get_db_session, get_engine
@@ -110,6 +112,16 @@ def seed_demo_data(*, reset: bool = False) -> dict[str, int]:
         "trade_operator": users[1]["id"],
         "institution_analyst": users[2]["id"],
     }
+    access_credentials = [
+        {
+            "id": _sid(f"cred.{record['email']}"),
+            "user_id": record["id"],
+            "label": "primary",
+            "access_code_hash": hash_access_code(build_seed_access_code(record["email"])),
+            "is_active": True,
+        }
+        for record in users
+    ]
 
     beneficiaries = [
         {
@@ -1055,6 +1067,8 @@ def seed_demo_data(*, reset: bool = False) -> dict[str, int]:
         session.flush()
         _upsert_many(session, User, users)
         session.flush()
+        _upsert_many(session, UserAccessCredential, access_credentials)
+        session.flush()
         _upsert_many(session, Beneficiary, beneficiaries)
         session.flush()
         _upsert_many(session, ConversationSession, sessions)
@@ -1077,6 +1091,7 @@ def seed_demo_data(*, reset: bool = False) -> dict[str, int]:
     return {
         "organizations": len(organizations),
         "users": len(users),
+        "user_access_credentials": len(access_credentials),
         "beneficiaries": len(beneficiaries),
         "sessions": len(sessions),
         "command_executions": len(command_executions),

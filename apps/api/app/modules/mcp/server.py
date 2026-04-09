@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import HTTPException
 from mcp.server.fastmcp import FastMCP
 
+from app.core.auth import AccessTokenError, parse_access_token
 from app.core.config import get_settings
 from app.db.models import FiatDepositOrder
 from app.db.session import get_db_session
@@ -67,6 +68,28 @@ def _kyc_block_payload(*, user_id: UUID, verification_id: str | None = None) -> 
     }
 
 
+def _sanitize_kyc_response_payload(payload: dict) -> dict:
+    verification = payload.get("verification")
+    if not isinstance(verification, dict):
+        return payload
+    sanitized = {
+        "id": verification.get("id"),
+        "subject_type": verification.get("subject_type"),
+        "subject_id": verification.get("subject_id"),
+        "provider": verification.get("provider"),
+        "status": verification.get("status"),
+        "verification_url": verification.get("verification_url"),
+        "verified_at": verification.get("verified_at"),
+        "failure_reason": verification.get("failure_reason"),
+        "created_at": verification.get("created_at"),
+        "updated_at": verification.get("updated_at"),
+    }
+    return {
+        **payload,
+        "verification": sanitized,
+    }
+
+
 def _http_error_payload(*, message: str, status_code: int, detail: str | dict | list | None, summary: dict | None = None) -> dict:
     return {
         "status": "validation_error",
@@ -78,6 +101,33 @@ def _http_error_payload(*, message: str, status_code: int, detail: str | dict | 
             "detail": detail,
         },
     }
+
+
+def _authenticate_mcp_user(*, user_id: UUID, access_token: str) -> dict | None:
+    if not access_token.strip():
+        return _http_error_payload(
+            message="missing access_token",
+            status_code=401,
+            detail="access_token is required",
+            summary={"user_id": str(user_id)},
+        )
+    try:
+        claims = parse_access_token(access_token)
+    except AccessTokenError as exc:
+        return _http_error_payload(
+            message=str(exc),
+            status_code=401,
+            detail="invalid access_token",
+            summary={"user_id": str(user_id)},
+        )
+    if claims.user_id != user_id:
+        return _http_error_payload(
+            message="access_token does not belong to the requested user",
+            status_code=403,
+            detail="access_token subject mismatch",
+            summary={"user_id": str(user_id)},
+        )
+    return None
 
 
 MCP_PRE_KYC_TOOLS = ["start_user_kyc", "get_kyc_status", "mcp_capability_status"]
@@ -150,10 +200,13 @@ def _ensure_deposit_belongs_to_user(*, user_id: UUID, deposit_order_id: UUID) ->
     name="mcp_capability_status",
     description="Check whether a user is eligible to use PayFi Box MCP settlement tools. Use this before calling payment tools.",
 )
-def mcp_capability_status(user_id: str) -> dict:
+def mcp_capability_status(user_id: str, access_token: str) -> dict:
     uid, parse_error = _parse_uuid_param(field_name="user_id", raw_value=user_id)
     if parse_error is not None:
         return parse_error
+    access_token_error = _authenticate_mcp_user(user_id=uid, access_token=access_token)
+    if access_token_error is not None:
+        return access_token_error
     try:
         with get_db_session() as session:
             _require_user(session=session, user_id=uid)
@@ -192,10 +245,13 @@ def mcp_capability_status(user_id: str) -> dict:
     name="start_user_kyc",
     description="Start or resume user identity verification for PayFi Box MCP access.",
 )
-def start_user_kyc(user_id: str, locale: str | None = None, force_new: bool = False) -> dict:
+def start_user_kyc(user_id: str, access_token: str, locale: str | None = None, force_new: bool = False) -> dict:
     uid, parse_error = _parse_uuid_param(field_name="user_id", raw_value=user_id)
     if parse_error is not None:
         return parse_error
+    access_token_error = _authenticate_mcp_user(user_id=uid, access_token=access_token)
+    if access_token_error is not None:
+        return access_token_error
     try:
         with get_db_session() as session:
             response = start_kyc_verification(
@@ -207,7 +263,7 @@ def start_user_kyc(user_id: str, locale: str | None = None, force_new: bool = Fa
                     force_new=force_new,
                 ),
             )
-            payload = _json(response)
+            payload = _sanitize_kyc_response_payload(_json(response))
             payload["summary"] = {
                 "user_id": user_id,
                 "kyc_status": payload.get("verification", {}).get("status") if payload.get("verification") else None,
@@ -224,26 +280,37 @@ def start_user_kyc(user_id: str, locale: str | None = None, force_new: bool = Fa
 
 @payfi_mcp.tool(
     name="get_kyc_status",
-    description="Fetch an existing KYC verification record by id.",
+    description="Fetch an existing KYC verification record for a specific user.",
 )
-def get_kyc_status(kyc_verification_id: str) -> dict:
+def get_kyc_status(user_id: str, access_token: str, kyc_verification_id: str) -> dict:
+    uid, user_parse_error = _parse_uuid_param(field_name="user_id", raw_value=user_id)
+    if user_parse_error is not None:
+        return user_parse_error
+    access_token_error = _authenticate_mcp_user(user_id=uid, access_token=access_token)
+    if access_token_error is not None:
+        return access_token_error
     kyc_id, parse_error = _parse_uuid_param(
         field_name="kyc_verification_id",
         raw_value=kyc_verification_id,
-        summary={"kyc_verification_id": kyc_verification_id},
+        summary={"user_id": user_id, "kyc_verification_id": kyc_verification_id},
     )
     if parse_error is not None:
         return parse_error
     try:
         with get_db_session() as session:
+            _require_user(session=session, user_id=uid)
             response = get_kyc_verification(session=session, kyc_id=kyc_id)
-            return _json(response)
+            payload = _sanitize_kyc_response_payload(_json(response))
+            verification = payload.get("verification") or {}
+            if verification.get("subject_id") != user_id:
+                raise HTTPException(status_code=403, detail="kyc verification does not belong to the user")
+            return payload
     except HTTPException as exc:
         return _http_error_payload(
             message=str(exc.detail),
             status_code=exc.status_code,
             detail=exc.detail,
-            summary={"kyc_verification_id": kyc_verification_id},
+            summary={"user_id": user_id, "kyc_verification_id": kyc_verification_id},
         )
 
 
@@ -251,10 +318,13 @@ def get_kyc_status(kyc_verification_id: str) -> dict:
     name="get_balance",
     description="Get a user's platform stablecoin balance. Requires verified KYC.",
 )
-def get_balance(user_id: str, currency: str = "USDT") -> dict:
+def get_balance(user_id: str, access_token: str, currency: str = "USDT") -> dict:
     uid, parse_error = _parse_uuid_param(field_name="user_id", raw_value=user_id)
     if parse_error is not None:
         return parse_error
+    access_token_error = _authenticate_mcp_user(user_id=uid, access_token=access_token)
+    if access_token_error is not None:
+        return access_token_error
     blocked = _ensure_mcp_kyc(uid)
     if blocked is not None:
         return blocked
@@ -282,10 +352,13 @@ def get_balance(user_id: str, currency: str = "USDT") -> dict:
     name="get_balance_ledger",
     description="Get recent platform balance ledger entries for a user. Requires verified KYC.",
 )
-def get_balance_ledger_tool(user_id: str, currency: str = "USDT", limit: int = 10) -> dict:
+def get_balance_ledger_tool(user_id: str, access_token: str, currency: str = "USDT", limit: int = 10) -> dict:
     uid, parse_error = _parse_uuid_param(field_name="user_id", raw_value=user_id)
     if parse_error is not None:
         return parse_error
+    access_token_error = _authenticate_mcp_user(user_id=uid, access_token=access_token)
+    if access_token_error is not None:
+        return access_token_error
     blocked = _ensure_mcp_kyc(uid)
     if blocked is not None:
         return blocked
@@ -320,6 +393,7 @@ def get_balance_ledger_tool(user_id: str, currency: str = "USDT", limit: int = 1
 )
 def payment_preview_from_balance(
     user_id: str,
+    access_token: str,
     prompt: str,
     execution_mode: str = "operator",
     locale: str | None = None,
@@ -327,6 +401,9 @@ def payment_preview_from_balance(
     uid, parse_error = _parse_uuid_param(field_name="user_id", raw_value=user_id)
     if parse_error is not None:
         return parse_error
+    access_token_error = _authenticate_mcp_user(user_id=uid, access_token=access_token)
+    if access_token_error is not None:
+        return access_token_error
     blocked = _ensure_mcp_kyc(uid)
     if blocked is not None:
         return blocked
@@ -372,6 +449,7 @@ def payment_preview_from_balance(
 )
 def payment_confirm_from_balance(
     user_id: str,
+    access_token: str,
     command_id: str,
     execution_mode: str = "operator",
     idempotency_key: str | None = None,
@@ -381,6 +459,9 @@ def payment_confirm_from_balance(
     uid, user_parse_error = _parse_uuid_param(field_name="user_id", raw_value=user_id)
     if user_parse_error is not None:
         return user_parse_error
+    access_token_error = _authenticate_mcp_user(user_id=uid, access_token=access_token)
+    if access_token_error is not None:
+        return access_token_error
     cmd_id, command_parse_error = _parse_uuid_param(
         field_name="command_id",
         raw_value=command_id,
@@ -436,6 +517,7 @@ def payment_confirm_from_balance(
 )
 def create_balance_deposit(
     user_id: str,
+    access_token: str,
     source_currency: str,
     source_amount: float,
     target_currency: str = "USDT",
@@ -444,6 +526,9 @@ def create_balance_deposit(
     uid, parse_error = _parse_uuid_param(field_name="user_id", raw_value=user_id)
     if parse_error is not None:
         return parse_error
+    access_token_error = _authenticate_mcp_user(user_id=uid, access_token=access_token)
+    if access_token_error is not None:
+        return access_token_error
     blocked = _ensure_mcp_kyc(uid)
     if blocked is not None:
         return blocked
@@ -496,6 +581,7 @@ def create_balance_deposit(
 )
 def start_balance_deposit_checkout(
     user_id: str,
+    access_token: str,
     deposit_order_id: str,
     success_url: str | None = None,
     cancel_url: str | None = None,
@@ -504,6 +590,9 @@ def start_balance_deposit_checkout(
     uid, user_parse_error = _parse_uuid_param(field_name="user_id", raw_value=user_id)
     if user_parse_error is not None:
         return user_parse_error
+    access_token_error = _authenticate_mcp_user(user_id=uid, access_token=access_token)
+    if access_token_error is not None:
+        return access_token_error
     blocked = _ensure_mcp_kyc(uid)
     if blocked is not None:
         return blocked
@@ -558,10 +647,13 @@ def start_balance_deposit_checkout(
     name="sync_balance_deposit_status",
     description="Sync Stripe payment status for a balance deposit and return the latest credited-balance view. Requires verified KYC and ownership of the deposit order.",
 )
-def sync_balance_deposit_status(user_id: str, deposit_order_id: str) -> dict:
+def sync_balance_deposit_status(user_id: str, access_token: str, deposit_order_id: str) -> dict:
     uid, user_parse_error = _parse_uuid_param(field_name="user_id", raw_value=user_id)
     if user_parse_error is not None:
         return user_parse_error
+    access_token_error = _authenticate_mcp_user(user_id=uid, access_token=access_token)
+    if access_token_error is not None:
+        return access_token_error
     blocked = _ensure_mcp_kyc(uid)
     if blocked is not None:
         return blocked
@@ -609,10 +701,13 @@ def sync_balance_deposit_status(user_id: str, deposit_order_id: str) -> dict:
     name="get_balance_deposit_detail",
     description="Get the latest detail for a balance deposit order, including any credited balance account view. Requires verified KYC and ownership of the deposit order.",
 )
-def get_balance_deposit_detail_tool(user_id: str, deposit_order_id: str) -> dict:
+def get_balance_deposit_detail_tool(user_id: str, access_token: str, deposit_order_id: str) -> dict:
     uid, user_parse_error = _parse_uuid_param(field_name="user_id", raw_value=user_id)
     if user_parse_error is not None:
         return user_parse_error
+    access_token_error = _authenticate_mcp_user(user_id=uid, access_token=access_token)
+    if access_token_error is not None:
+        return access_token_error
     blocked = _ensure_mcp_kyc(uid)
     if blocked is not None:
         return blocked

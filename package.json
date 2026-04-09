@@ -23,8 +23,8 @@
     "lint:web": "npm --workspace apps/web run lint",
     "lint:api": "./.venv/bin/python -m compileall apps/api/app",
     "test": "npm run test:web && npm run test:api",
-    "test:web": "node -e \"console.log('Web test placeholder: add Vitest or Playwright in step 2.')\"",
-    "test:api": "node -e \"console.log('API test placeholder: add pytest suites in step 2.')\""
+    "test:web": "npm --workspace apps/web run build",
+    "test:api": "env -u DATABASE_URL ./.venv/bin/python scripts/verify_balance_deposit.py"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

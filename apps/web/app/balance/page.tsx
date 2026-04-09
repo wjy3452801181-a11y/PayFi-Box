@@ -12,6 +12,7 @@ import {
   type BalancePaymentPreviewResponse,
   type BalanceStartStripePaymentResponse,
   type KycStartResponse,
+  getRememberedActorId,
   getBalanceAccount,
   getBalanceDepositDetail,
   getBalanceLedger,
@@ -22,6 +23,7 @@ import {
   postMerchantKycStart,
   postStartBalanceDepositStripePayment,
   postSyncBalanceDepositStripePayment,
+  rememberActorId,
 } from "../../lib/api";
 import { formatAmount, formatTime } from "../../lib/format";
 import { useI18n } from "../../lib/i18n-provider";
@@ -30,6 +32,7 @@ import { StatusBadge } from "../../components/status-badge";
 
 const DEFAULT_USER_ID = "babd0649-6a5a-5d02-aa46-9070ee5248d4";
 const LAST_DEPOSIT_STORAGE_KEY = "payfi_last_balance_deposit_id";
+const ACCESS_TOKEN_PLACEHOLDER = "<access_token from /api/auth/session>";
 
 type ExecutionMode = "operator" | "user_wallet" | "safe";
 type BalanceMcpTool = "capability" | "deposit" | "sync" | "preview" | "confirm";
@@ -298,7 +301,7 @@ function getTreasuryGuidance(input: {
 
 export default function BalancePage() {
   const { t, lang, statusLabel } = useI18n();
-  const [userId, setUserId] = useState(DEFAULT_USER_ID);
+  const [userId, setUserId] = useState(() => getRememberedActorId() || DEFAULT_USER_ID);
   const [currency, setCurrency] = useState("USDT");
   const [sourceCurrency, setSourceCurrency] = useState("USD");
   const [sourceAmount, setSourceAmount] = useState("500");
@@ -323,6 +326,10 @@ export default function BalancePage() {
 
   const activeDepositId = latestDeposit?.id || null;
 
+  useEffect(() => {
+    rememberActorId(userId.trim() || null);
+  }, [userId]);
+
   async function refreshBalanceState(targetUserId = userId, targetCurrency = currency) {
     const [account, ledger] = await Promise.all([
       getBalanceAccount(targetUserId, targetCurrency),
@@ -333,7 +340,7 @@ export default function BalancePage() {
   }
 
   async function loadDepositDetail(depositId: string) {
-    const detail = await getBalanceDepositDetail(depositId);
+    const detail = await getBalanceDepositDetail(depositId, userId.trim());
     setLatestDeposit(detail.deposit_order);
     setLatestDepositDetail(detail);
     if (typeof window !== "undefined") {
@@ -361,7 +368,7 @@ export default function BalancePage() {
         const lastDepositId = window.localStorage.getItem(LAST_DEPOSIT_STORAGE_KEY);
         if (lastDepositId) {
           try {
-            const detail = await getBalanceDepositDetail(lastDepositId);
+            const detail = await getBalanceDepositDetail(lastDepositId, userId.trim());
             if (!active) return;
             setLatestDeposit(detail.deposit_order);
             setLatestDepositDetail(detail);
@@ -382,7 +389,7 @@ export default function BalancePage() {
     if (!verificationId) return;
     void (async () => {
       try {
-        const nextKyc = await getKycVerification(verificationId);
+        const nextKyc = await getKycVerification(verificationId, userId.trim());
         if (!active) return;
         setKycResult(nextKyc);
       } catch {
@@ -392,7 +399,7 @@ export default function BalancePage() {
     return () => {
       active = false;
     };
-  }, [latestDeposit?.kyc_verification_id]);
+  }, [latestDeposit?.kyc_verification_id, userId]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -408,7 +415,7 @@ export default function BalancePage() {
     void (async () => {
       try {
         if (shouldSyncDeposit) {
-          const synced = await postSyncBalanceDepositStripePayment(candidateId);
+          const synced = await postSyncBalanceDepositStripePayment(candidateId, userId.trim());
           setLatestDeposit(synced.deposit_order);
           setLatestDepositDetail(synced);
           await refreshBalanceState();
@@ -425,7 +432,7 @@ export default function BalancePage() {
         window.history.replaceState({}, "", "/balance");
       }
     })();
-  }, []);
+  }, [userId]);
 
   const previewPayload = previewResult?.preview as Record<string, unknown> | undefined;
   const previewRecipient = extractPreviewField(previewPayload, [
@@ -472,7 +479,8 @@ export default function BalancePage() {
     () => `{
   "tool": "mcp_capability_status",
   "arguments": {
-    "user_id": "${userId}"
+    "user_id": "${userId}",
+    "access_token": "${ACCESS_TOKEN_PLACEHOLDER}"
   }
 }`,
     [userId],
@@ -483,6 +491,7 @@ export default function BalancePage() {
   "tool": "create_balance_deposit",
   "arguments": {
     "user_id": "${userId}",
+    "access_token": "${ACCESS_TOKEN_PLACEHOLDER}",
     "source_currency": "${sourceCurrency}",
     "source_amount": ${Number(sourceAmount || 0)},
     "target_currency": "${currency}",
@@ -497,6 +506,7 @@ export default function BalancePage() {
   "tool": "payment_preview_from_balance",
   "arguments": {
     "user_id": "${userId}",
+    "access_token": "${ACCESS_TOKEN_PLACEHOLDER}",
     "prompt": "${paymentPrompt.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"")}",
     "execution_mode": "${executionMode}"
   }
@@ -510,6 +520,7 @@ export default function BalancePage() {
   "tool": "payment_confirm_from_balance",
   "arguments": {
     "user_id": "${userId}",
+    "access_token": "${ACCESS_TOKEN_PLACEHOLDER}",
     "command_id": "${previewResult?.command_id || "preview-command-id"}",
     "execution_mode": "${executionMode}",
     "idempotency_key": "balance:${previewResult?.command_id || "preview-command-id"}"
@@ -681,7 +692,7 @@ export default function BalancePage() {
       capability: {
         request: prettyJson({
           tool: "mcp_capability_status",
-          arguments: { user_id: userId },
+          arguments: { user_id: userId, access_token: ACCESS_TOKEN_PLACEHOLDER },
         }),
         response: prettyJson(capabilityResponse),
       },
@@ -692,7 +703,11 @@ export default function BalancePage() {
       sync: {
         request: prettyJson({
           tool: "sync_balance_deposit_status",
-          arguments: { user_id: userId, deposit_order_id: latestDeposit?.id || "deposit-order-id" },
+          arguments: {
+            user_id: userId,
+            access_token: ACCESS_TOKEN_PLACEHOLDER,
+            deposit_order_id: latestDeposit?.id || "deposit-order-id",
+          },
         }),
         response: prettyJson(syncResponse),
       },
@@ -772,7 +787,7 @@ export default function BalancePage() {
 
       inFlight = true;
       try {
-        const detail = await postSyncBalanceDepositStripePayment(activeDepositId);
+        const detail = await postSyncBalanceDepositStripePayment(activeDepositId, userId.trim());
         if (cancelled) return;
         setLatestDeposit(detail.deposit_order);
         setLatestDepositDetail(detail);
@@ -799,7 +814,7 @@ export default function BalancePage() {
       if (timeoutId !== null) window.clearTimeout(timeoutId);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [activeDepositId, shouldPollDeposit]);
+  }, [activeDepositId, shouldPollDeposit, userId]);
 
   async function handleRefresh() {
     setLoading("refresh");
@@ -870,7 +885,7 @@ export default function BalancePage() {
         success_url: `${origin}/balance?stripe=success&deposit_order_id=${activeDepositId}`,
         cancel_url: `${origin}/balance?stripe=cancel&deposit_order_id=${activeDepositId}`,
         locale: lang,
-      });
+      }, userId.trim());
       setLatestDeposit(response.deposit_order);
       setLatestCheckout(response.checkout || null);
       await loadDepositDetail(activeDepositId);
@@ -886,7 +901,7 @@ export default function BalancePage() {
     setLoading("sync");
     setError(null);
     try {
-      const detail = await postSyncBalanceDepositStripePayment(activeDepositId);
+      const detail = await postSyncBalanceDepositStripePayment(activeDepositId, userId.trim());
       setLatestDeposit(detail.deposit_order);
       setLatestDepositDetail(detail);
       await refreshBalanceState();

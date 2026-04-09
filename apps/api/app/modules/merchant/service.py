@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -206,6 +207,35 @@ def _normalize_stripe_checkout_locale(locale: str | None) -> str | None:
     }
     canonical = alias_map.get(normalized_key, _STRIPE_CHECKOUT_LOCALE_LOOKUP.get(normalized_key))
     return canonical
+
+
+def _resolve_stripe_checkout_redirect_url(
+    *,
+    requested_url: str | None,
+    default_url: str,
+    settings,
+    field_name: str,
+) -> str:
+    candidate = (requested_url or default_url or "").strip()
+    if not candidate:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} must be configured",
+        )
+    parsed = urlparse(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} must be an absolute http(s) URL",
+        )
+    origin = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+    allowed = {item.rstrip("/") for item in settings.stripe_checkout_allowed_origins if item.strip()}
+    if origin not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} origin is not allowed: {origin}",
+        )
+    return candidate
 
 
 def create_settlement_quote(session: Session, request: SettlementQuoteRequest) -> SettlementQuoteResponse:
@@ -569,10 +599,22 @@ def create_stripe_checkout_session(
         "beneficiary_id": str(intent.beneficiary_id),
         "reference": intent.reference,
     }
+    success_url = _resolve_stripe_checkout_redirect_url(
+        requested_url=request.success_url,
+        default_url=settings.stripe_checkout_success_url,
+        settings=settings,
+        field_name="success_url",
+    )
+    cancel_url = _resolve_stripe_checkout_redirect_url(
+        requested_url=request.cancel_url,
+        default_url=settings.stripe_checkout_cancel_url,
+        settings=settings,
+        field_name="cancel_url",
+    )
     checkout_payload: dict[str, Any] = {
         "mode": "payment",
-        "success_url": request.success_url or settings.stripe_checkout_success_url,
-        "cancel_url": request.cancel_url or settings.stripe_checkout_cancel_url,
+        "success_url": success_url,
+        "cancel_url": cancel_url,
         "line_items": [
             {
                 "price_data": {

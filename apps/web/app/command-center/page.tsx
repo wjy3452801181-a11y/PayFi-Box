@@ -7,11 +7,13 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   type CommandResponse,
   type ConfirmResponse,
+  getRememberedActorId,
   postExecutionItemAttachSafeProposal,
   postExecutionItemAttachTx,
   postExecutionItemSyncReceipt,
   postCommand,
   postConfirm,
+  rememberActorId,
 } from "../../lib/api";
 import {
   buildExamplePrompts,
@@ -57,7 +59,7 @@ export default function CommandCenterPage() {
     { title: t("command.aiRouteTitle"), body: t("command.aiRouteBody") },
   ];
 
-  const [userId, setUserId] = useState("deaa3ed3-c910-53d0-8796-755d9c82add6");
+  const [userId, setUserId] = useState(() => getRememberedActorId() || "deaa3ed3-c910-53d0-8796-755d9c82add6");
   const [sessionId, setSessionId] = useState("5ad9af15-ca05-5124-8ae6-3492f0090dca");
   const [amount, setAmount] = useState("100");
   const [currency, setCurrency] = useState("USDT");
@@ -145,6 +147,10 @@ export default function CommandCenterPage() {
     riskDecision: commandResult?.risk?.decision,
   });
 
+  useEffect(() => {
+    rememberActorId(userId.trim() || null);
+  }, [userId]);
+
   function handleCreateRecipient(payload: {
     name: string;
     address: string;
@@ -203,7 +209,7 @@ export default function CommandCenterPage() {
         execution_mode: executionMode,
         idempotency_key: idempotencyKey.trim() || undefined,
         locale: lang === "zh" ? "zh-CN" : "en-US",
-      });
+      }, userId.trim());
       if (response.command_id !== boundCommandId) {
         setError(t("command.staleConfirmGuard"));
         return;
@@ -266,7 +272,7 @@ export default function CommandCenterPage() {
         tx_hash: input.txHash,
         wallet_address: input.walletAddress || null,
         locale: lang === "zh" ? "zh-CN" : "en-US",
-      });
+      }, userId.trim());
       setInfoMessage(result.message);
       setConfirmResult((current) => {
         if (!current) return current;
@@ -307,7 +313,7 @@ export default function CommandCenterPage() {
         proposal_id: input.proposalId || null,
         proposal_url: input.proposalUrl || null,
         proposer_wallet: input.proposerWallet || null,
-      });
+      }, userId.trim());
       setInfoMessage(result.message);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("common.error"));
@@ -321,7 +327,7 @@ export default function CommandCenterPage() {
     setError(null);
     setInfoMessage(null);
     try {
-      const result = await postExecutionItemSyncReceipt(executionItemId, { force: false });
+      const result = await postExecutionItemSyncReceipt(executionItemId, { force: false }, userId.trim());
       setInfoMessage(result.message);
       setConfirmResult((current) => {
         if (!current) return current;

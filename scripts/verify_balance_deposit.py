@@ -21,7 +21,8 @@ if str(API_APP_PATH) not in sys.path:
 
 from sqlalchemy import select
 
-from app.db.models import KycVerification, User, UserRole
+from app.core.auth import build_seed_access_code, hash_access_code
+from app.db.models import KycVerification, User, UserAccessCredential, UserRole
 from app.db.session import get_db_session
 
 DEFAULT_API_BASE = "http://127.0.0.1:8000"
@@ -58,16 +59,34 @@ def _ensure_user_record(*, user_id: str, name: str, email: str, role: str) -> st
     with get_db_session() as session:
         user = session.get(User, uid)
         if user is None:
+            user = User(
+                id=uid,
+                name=name,
+                email=email,
+                role=role,
+                organization_id=None,
+            )
+            session.add(user)
+        credential = session.execute(
+            select(UserAccessCredential).where(UserAccessCredential.user_id == uid).limit(1)
+        ).scalar_one_or_none()
+        access_code_hash = hash_access_code(build_seed_access_code(user.email))
+        if credential is None:
             session.add(
-                User(
-                    id=uid,
-                    name=name,
-                    email=email,
-                    role=role,
-                    organization_id=None,
+                UserAccessCredential(
+                    id=uuid.uuid5(SEED_NAMESPACE, f"cred.{user.email}"),
+                    user_id=uid,
+                    label="primary",
+                    access_code_hash=access_code_hash,
+                    is_active=True,
                 )
             )
-            session.commit()
+        else:
+            credential.label = "primary"
+            credential.access_code_hash = access_code_hash
+            credential.is_active = True
+            credential.last_used_at = None
+        session.commit()
     return user_id
 
 
@@ -149,6 +168,7 @@ class BalanceDepositVerifier:
         self.verified_user_id = verified_user_id
         self.timeout_seconds = timeout_seconds
         self._opener = request.build_opener(request.ProxyHandler({}))
+        self._tokens_by_user_id: dict[str, str] = {}
 
     def _request_json(
         self,
@@ -181,6 +201,25 @@ class BalanceDepositVerifier:
         except error.URLError as exc:
             raise VerificationError(f"{method} {path} failed: {exc.reason}") from exc
 
+    def _session_token_for_user(self, user_id: str) -> str:
+        cached = self._tokens_by_user_id.get(user_id)
+        if cached:
+            return cached
+        with get_db_session() as session:
+            user = session.get(User, uuid.UUID(user_id))
+            if user is None:
+                raise VerificationError(f"user not found for auth session: {user_id}")
+            access_code = build_seed_access_code(user.email)
+        status, data = self._request_json(
+            "POST",
+            "/api/auth/session",
+            payload={"email": user.email, "access_code": access_code},
+        )
+        if status != 200 or not data.get("access_token"):
+            raise VerificationError(f"create auth session failed: {status} {data}")
+        self._tokens_by_user_id[user_id] = data["access_token"]
+        return data["access_token"]
+
     def _assert_health(self) -> None:
         status, data = self._request_json("GET", "/health")
         if status != 200 or data.get("status") != "ok":
@@ -191,6 +230,7 @@ class BalanceDepositVerifier:
             "POST",
             "/api/kyc/start",
             payload={"subject_type": "user", "subject_id": user_id},
+            extra_headers={"Authorization": f"Bearer {self._session_token_for_user(user_id)}"},
         )
         if status != 200:
             raise VerificationError(f"start user kyc failed: {status} {data}")
@@ -207,12 +247,13 @@ class BalanceDepositVerifier:
                 "target_currency": "USDT",
                 "reference": reference,
             },
+            extra_headers={"Authorization": f"Bearer {self._session_token_for_user(user_id)}"},
         )
         if status != 200:
             raise VerificationError(f"create deposit failed: {status} {data}")
         return data
 
-    def _start_checkout(self, deposit_order_id: str) -> tuple[int, dict[str, Any]]:
+    def _start_checkout(self, user_id: str, deposit_order_id: str) -> tuple[int, dict[str, Any]]:
         return self._request_json(
             "POST",
             f"/api/balance/deposits/{deposit_order_id}/start-stripe-payment",
@@ -221,19 +262,33 @@ class BalanceDepositVerifier:
                 "cancel_url": "http://127.0.0.1:3000/balance?stripe=cancel",
                 "locale": "zh",
             },
+            extra_headers={"Authorization": f"Bearer {self._session_token_for_user(user_id)}"},
         )
 
-    def _sync_deposit(self, deposit_order_id: str) -> tuple[int, dict[str, Any]]:
-        return self._request_json("POST", f"/api/balance/deposits/{deposit_order_id}/sync-stripe-payment", payload={})
+    def _sync_deposit(self, user_id: str, deposit_order_id: str) -> tuple[int, dict[str, Any]]:
+        return self._request_json(
+            "POST",
+            f"/api/balance/deposits/{deposit_order_id}/sync-stripe-payment",
+            payload={},
+            extra_headers={"Authorization": f"Bearer {self._session_token_for_user(user_id)}"},
+        )
 
-    def _get_deposit(self, deposit_order_id: str) -> dict[str, Any]:
-        status, data = self._request_json("GET", f"/api/balance/deposits/{deposit_order_id}")
+    def _get_deposit(self, user_id: str, deposit_order_id: str) -> dict[str, Any]:
+        status, data = self._request_json(
+            "GET",
+            f"/api/balance/deposits/{deposit_order_id}",
+            extra_headers={"Authorization": f"Bearer {self._session_token_for_user(user_id)}"},
+        )
         if status != 200:
             raise VerificationError(f"get deposit detail failed: {status} {data}")
         return data
 
     def _get_balance(self, user_id: str, currency: str = "USDT") -> dict[str, Any]:
-        status, data = self._request_json("GET", f"/api/balance/accounts/{user_id}?currency={currency}")
+        status, data = self._request_json(
+            "GET",
+            f"/api/balance/accounts/{user_id}?currency={currency}",
+            extra_headers={"Authorization": f"Bearer {self._session_token_for_user(user_id)}"},
+        )
         if status != 200:
             raise VerificationError(f"get balance failed: {status} {data}")
         return data
@@ -271,7 +326,7 @@ class BalanceDepositVerifier:
             reference=f"DEP-A-{uuid.uuid4().hex[:8]}",
         )
         deposit_order_id = result["deposit_order"]["id"]
-        status, start_result = self._start_checkout(deposit_order_id)
+        status, start_result = self._start_checkout(self.unverified_user_id, deposit_order_id)
         ok = (
             status == 200
             and start_result.get("status") == "validation_error"
@@ -299,7 +354,7 @@ class BalanceDepositVerifier:
             reference=f"DEP-B-{uuid.uuid4().hex[:8]}",
         )
         deposit_order_id = result["deposit_order"]["id"]
-        status, start_result = self._start_checkout(deposit_order_id)
+        status, start_result = self._start_checkout(self.verified_user_id, deposit_order_id)
         checkout = start_result.get("checkout") or {}
         result_status = start_result.get("status")
         message = start_result.get("message")
@@ -338,9 +393,9 @@ class BalanceDepositVerifier:
             reference=f"DEP-C-{uuid.uuid4().hex[:8]}",
         )
         deposit_order_id = result["deposit_order"]["id"]
-        _, start_result = self._start_checkout(deposit_order_id)
+        _, start_result = self._start_checkout(self.verified_user_id, deposit_order_id)
         checkout = start_result.get("checkout") or {}
-        deposit = self._get_deposit(deposit_order_id)
+        deposit = self._get_deposit(self.verified_user_id, deposit_order_id)
         payment_intent_id = (
             checkout.get("payment_intent_id")
             or deposit["deposit_order"].get("channel_payment_id")
@@ -353,7 +408,7 @@ class BalanceDepositVerifier:
             payment_intent_id=payment_intent_id,
             event_id=event_id,
         )
-        after = self._get_deposit(deposit_order_id)
+        after = self._get_deposit(self.verified_user_id, deposit_order_id)
         after_balance = self._get_balance(self.verified_user_id)["account"]["available_balance"]
         ok = (
             status == 200
@@ -387,7 +442,7 @@ class BalanceDepositVerifier:
             reference=f"DEP-D-{uuid.uuid4().hex[:8]}",
         )
         deposit_order_id = result["deposit_order"]["id"]
-        _, start_result = self._start_checkout(deposit_order_id)
+        _, start_result = self._start_checkout(self.verified_user_id, deposit_order_id)
         checkout = start_result.get("checkout") or {}
         payment_intent_id = checkout.get("payment_intent_id") or f"pi_demo_{uuid.uuid4().hex[:18]}"
         event_id = f"evt_dep_dup_{uuid.uuid4().hex[:10]}"
@@ -397,7 +452,7 @@ class BalanceDepositVerifier:
             event_id=event_id,
         )
         balance_after_first = self._get_balance(self.verified_user_id)["account"]["available_balance"]
-        first_detail = self._get_deposit(deposit_order_id)
+        first_detail = self._get_deposit(self.verified_user_id, deposit_order_id)
         first_ledger_id = (first_detail.get("latest_ledger_entry") or {}).get("id")
         status, second_result = self._send_payment_succeeded_webhook(
             deposit_order_id=deposit_order_id,
@@ -405,7 +460,7 @@ class BalanceDepositVerifier:
             event_id=event_id,
         )
         balance_after_second = self._get_balance(self.verified_user_id)["account"]["available_balance"]
-        second_detail = self._get_deposit(deposit_order_id)
+        second_detail = self._get_deposit(self.verified_user_id, deposit_order_id)
         second_ledger_id = (second_detail.get("latest_ledger_entry") or {}).get("id")
         duplicate_status = second_result.get("result", {}).get("status")
         ok = (

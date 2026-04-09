@@ -6,6 +6,9 @@ import { useState } from "react";
 import { useI18n } from "../../lib/i18n-provider";
 
 const ENDPOINT = "http://127.0.0.1:8000/mcp/";
+const AUTH_SESSION_ENDPOINT = "http://127.0.0.1:8000/api/auth/session";
+const ACCESS_TOKEN_PLACEHOLDER = "<access_token from /api/auth/session>";
+const ACCESS_CODE_PLACEHOLDER = "<access_code>";
 
 type ToolGroup = {
   title: string;
@@ -123,16 +126,27 @@ export default function McpPage() {
   ];
 
   const exampleOne = `{
-  "tool": "mcp_capability_status",
-  "arguments": {
-    "user_id": "deaa3ed3-c910-53d0-8796-755d9c82add6"
+  "transport": "http",
+  "endpoint": "${AUTH_SESSION_ENDPOINT}",
+  "request": {
+    "email": "chen.trade@payfi.demo",
+    "access_code": "${ACCESS_CODE_PLACEHOLDER}"
   }
 }`;
 
   const exampleTwo = `{
+  "tool": "mcp_capability_status",
+  "arguments": {
+    "user_id": "deaa3ed3-c910-53d0-8796-755d9c82add6",
+    "access_token": "${ACCESS_TOKEN_PLACEHOLDER}"
+  }
+}`;
+
+  const exampleThree = `{
   "tool": "create_balance_deposit",
   "arguments": {
     "user_id": "deaa3ed3-c910-53d0-8796-755d9c82add6",
+    "access_token": "${ACCESS_TOKEN_PLACEHOLDER}",
     "source_currency": "HKD",
     "source_amount": 1000,
     "target_currency": "USDT",
@@ -140,16 +154,17 @@ export default function McpPage() {
   }
 }`;
 
-  const exampleThree = `{
+  const exampleFour = `{
   "tool": "payment_preview_from_balance",
   "arguments": {
     "user_id": "deaa3ed3-c910-53d0-8796-755d9c82add6",
+    "access_token": "${ACCESS_TOKEN_PLACEHOLDER}",
     "prompt": "从平台余额给 Alice 支付 150 USDT，今晚到账",
     "execution_mode": "operator"
   }
 }`;
 
-  const exampleFour = `{
+  const exampleValidation = `{
   "status": "validation_error",
   "message": "invalid user_id",
   "next_action": "none",
@@ -245,14 +260,15 @@ export default function McpPage() {
   }
 }`;
 
-  const callSequence = `1. mcp_capability_status
-2. start_user_kyc
-3. create_balance_deposit
-4. start_balance_deposit_checkout
-5. sync_balance_deposit_status
-6. get_balance
-7. payment_preview_from_balance
-8. payment_confirm_from_balance`;
+  const callSequence = `1. POST /api/auth/session
+2. mcp_capability_status
+3. start_user_kyc
+4. create_balance_deposit
+5. start_balance_deposit_checkout
+6. sync_balance_deposit_status
+7. get_balance
+8. payment_preview_from_balance
+9. payment_confirm_from_balance`;
 
   const responseExamples: ResponseExample[] = [
     {
@@ -285,7 +301,7 @@ export default function McpPage() {
       tool: "payment_preview_from_balance",
       title: t("mcp.responseValidationTitle"),
       body: t("mcp.responseValidationBody"),
-      snippet: exampleFour,
+      snippet: exampleValidation,
     },
   ];
   const toolFilterOptions = [
@@ -304,6 +320,7 @@ export default function McpPage() {
     filteredResponseExamples[0] ??
     responseExamples[0];
   const accessFacts = [
+    { label: t("mcp.readinessAuth"), value: AUTH_SESSION_ENDPOINT, mono: true },
     { label: t("mcp.readinessEndpoint"), value: ENDPOINT, mono: true },
     { label: t("mcp.accessTransportLabel"), value: "streamable_http" },
     { label: t("mcp.readinessGate"), value: t("mcp.readinessGateValue") },
@@ -313,22 +330,28 @@ export default function McpPage() {
   ];
   const requestExamples = [
     {
+      key: "access",
+      title: t("mcp.requestAccessTitle"),
+      body: t("mcp.requestAccessBody"),
+      snippet: exampleOne,
+    },
+    {
       key: "capability",
       title: t("mcp.requestCapabilityTitle"),
       body: t("mcp.requestCapabilityBody"),
-      snippet: exampleOne,
+      snippet: exampleTwo,
     },
     {
       key: "deposit",
       title: t("mcp.requestDepositTitle"),
       body: t("mcp.requestDepositBody"),
-      snippet: exampleTwo,
+      snippet: exampleThree,
     },
     {
       key: "preview",
       title: t("mcp.requestPreviewTitle"),
       body: t("mcp.requestPreviewBody"),
-      snippet: exampleThree,
+      snippet: exampleFour,
     },
   ];
   const sectionLinks = [

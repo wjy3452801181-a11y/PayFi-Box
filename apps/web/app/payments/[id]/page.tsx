@@ -1,13 +1,15 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useParams } from "next/navigation";
+import Link from "next/link";
+import { useParams, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
 import {
   type CommandTimelineResponse,
   type PaymentDetailResponse,
   getCommandTimeline,
+  getRememberedAccessSession,
   getPaymentDetail,
 } from "../../../lib/api";
 import { formatTime } from "../../../lib/format";
@@ -195,6 +197,7 @@ function buildAuditNarrative(
 
 export default function PaymentDetailPage() {
   const { t, lang } = useI18n();
+  const router = useRouter();
   const params = useParams<{ id: string }>();
   const paymentId = params.id;
 
@@ -202,22 +205,43 @@ export default function PaymentDetailPage() {
   const [timeline, setTimeline] = useState<CommandTimelineResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [actorId, setActorId] = useState<string | null>(null);
+  const [hasAccessSession, setHasAccessSession] = useState(false);
+  const [sessionChecked, setSessionChecked] = useState(false);
+  const [redirectingToAccess, setRedirectingToAccess] = useState(false);
+
+  useEffect(() => {
+    const session = getRememberedAccessSession();
+    setActorId(session?.user.id || null);
+    setHasAccessSession(Boolean(session?.access_token));
+    setSessionChecked(true);
+  }, []);
 
   useEffect(() => {
     let active = true;
     async function loadData() {
       if (!paymentId) return;
+      if (!sessionChecked) return;
+      if (!actorId) {
+        if (active) {
+          setRedirectingToAccess(true);
+          setLoading(false);
+          router.replace(`/access?next=/payments/${paymentId}`);
+        }
+        return;
+      }
+      if (active) setRedirectingToAccess(false);
       setLoading(true);
       setError(null);
       try {
-        const paymentDetail = await getPaymentDetail(paymentId);
+        const paymentDetail = await getPaymentDetail(paymentId, actorId);
         if (!active) return;
         setDetail(paymentDetail);
 
         const commandId = paymentDetail.command?.id;
         if (commandId) {
           try {
-            const timelineData = await getCommandTimeline(commandId);
+            const timelineData = await getCommandTimeline(commandId, actorId);
             if (!active) return;
             setTimeline(timelineData);
           } catch {
@@ -238,7 +262,7 @@ export default function PaymentDetailPage() {
     return () => {
       active = false;
     };
-  }, [paymentId, t]);
+  }, [actorId, paymentId, router, sessionChecked, t]);
 
   const timelineItems = useMemo(() => {
     if (timeline?.items?.length) return timeline.items;
@@ -283,9 +307,36 @@ export default function PaymentDetailPage() {
           {t("payment.loading")}
         </section>
       ) : null}
+      {redirectingToAccess ? (
+        <section className="rounded-2xl border border-[#c8d4ea] bg-[#f7f9fd] p-4 text-sm text-slate-700 motion-fade-up motion-delay-1">
+          <div className="space-y-3">
+            <p>
+              {lang === "zh"
+                ? "当前浏览器还没有访问会话，正在跳转到访问页以继续查看这笔结算。"
+                : "No access session is active yet. Redirecting to the access page so this settlement can be reopened."}
+            </p>
+            <Link
+              href={`/access?next=/payments/${paymentId}`}
+              className="inline-flex rounded-2xl bg-[#0f1b3d] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#162757]"
+            >
+              {lang === "zh" ? "前往访问页" : "Open access page"}
+            </Link>
+          </div>
+        </section>
+      ) : null}
       {error ? (
         <section className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700 motion-fade-up motion-delay-1">
-          {error}
+          <div className="space-y-3">
+            <p>{error}</p>
+            {!hasAccessSession ? (
+              <Link
+                href={`/access?next=/payments/${paymentId}`}
+                className="inline-flex rounded-2xl bg-[#0f1b3d] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#162757]"
+              >
+                {lang === "zh" ? "建立访问会话" : "Create access session"}
+              </Link>
+            ) : null}
+          </div>
         </section>
       ) : null}
 

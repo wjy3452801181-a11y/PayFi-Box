@@ -1,9 +1,37 @@
 from __future__ import annotations
 
+from uuid import UUID
+
+from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import AuditLog
+from app.core.access import (
+    require_actor_user,
+    require_command_access,
+    require_deposit_access,
+    require_execution_batch_access,
+    require_execution_item_access,
+    require_fiat_payment_access,
+    require_kyc_access,
+    require_payment_access,
+    require_quote_access,
+)
+from app.db.models import (
+    AuditLog,
+    Beneficiary,
+    CommandExecution,
+    ConversationSession,
+    FiatPaymentIntent,
+    PaymentExecutionBatch,
+    PaymentExecutionItem,
+    PaymentOrder,
+    PaymentSplit,
+    PlatformBalanceAccount,
+    PlatformBalanceLock,
+    StablecoinPayoutLink,
+    User,
+)
 from app.modules.audit.schemas import AuditTimelineItem, AuditTraceResponse
 
 
@@ -56,10 +84,15 @@ ACTION_TITLES = {
 }
 
 
-def get_audit_trace(session: Session, trace_id: str) -> AuditTraceResponse:
+def get_audit_trace(session: Session, *, actor_user_id: UUID, trace_id: str) -> AuditTraceResponse:
+    actor_user = require_actor_user(session, actor_user_id)
     logs = session.execute(
         select(AuditLog).where(AuditLog.trace_id == trace_id).order_by(AuditLog.created_at.asc())
     ).scalars().all()
+    if not logs:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"audit trace not found: {trace_id}")
+    for log in logs:
+        _assert_actor_can_view_log(session=session, actor_user=actor_user, log=log)
     items = build_audit_timeline_items(logs)
     return AuditTraceResponse(trace_id=trace_id, count=len(items), items=items)
 
@@ -94,3 +127,96 @@ def _resolve_details(log: AuditLog) -> dict[str, object] | None:
     if log.before_json is not None:
         return log.before_json
     return None
+
+
+def _assert_actor_can_view_log(*, session: Session, actor_user: User, log: AuditLog) -> None:
+    if log.actor_user_id == actor_user.id:
+        return
+    if _entity_is_visible_to_actor(session=session, actor_user=actor_user, entity_type=log.entity_type, entity_id=log.entity_id):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="audit trace does not belong to the current actor",
+    )
+
+
+def _entity_is_visible_to_actor(
+    *,
+    session: Session,
+    actor_user: User,
+    entity_type: str,
+    entity_id: UUID,
+) -> bool:
+    actor_user_id = actor_user.id
+    if entity_type == "command_execution":
+        require_command_access(session, actor_user_id=actor_user_id, command_id=entity_id)
+        return True
+    if entity_type == "payment_order":
+        require_payment_access(session, actor_user_id=actor_user_id, payment_id=entity_id)
+        return True
+    if entity_type == "payment_execution_batch":
+        require_execution_batch_access(session, actor_user_id=actor_user_id, execution_batch_id=entity_id)
+        return True
+    if entity_type == "payment_execution_item":
+        require_execution_item_access(session, actor_user_id=actor_user_id, execution_item_id=entity_id)
+        return True
+    if entity_type == "settlement_quote":
+        require_quote_access(session, actor_user_id=actor_user_id, quote_id=entity_id)
+        return True
+    if entity_type == "fiat_payment_intent":
+        require_fiat_payment_access(session, actor_user_id=actor_user_id, fiat_payment_intent_id=entity_id)
+        return True
+    if entity_type == "kyc_verification":
+        require_kyc_access(session, actor_user_id=actor_user_id, kyc_id=entity_id)
+        return True
+    if entity_type == "fiat_deposit_order":
+        require_deposit_access(session, actor_user_id=actor_user_id, deposit_order_id=entity_id)
+        return True
+    if entity_type == "payment_split":
+        split_row = session.execute(
+            select(PaymentSplit, PaymentOrder)
+            .join(PaymentOrder, PaymentOrder.id == PaymentSplit.payment_order_id)
+            .where(PaymentSplit.id == entity_id)
+            .limit(1)
+        ).one_or_none()
+        if split_row is None or split_row[1].user_id != actor_user_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="payment split does not belong to the current actor")
+        return True
+    if entity_type == "beneficiary":
+        beneficiary = session.get(Beneficiary, entity_id)
+        if beneficiary is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"beneficiary not found: {entity_id}")
+        if beneficiary.organization_id is not None and beneficiary.organization_id != actor_user.organization_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="beneficiary does not belong to the current actor")
+        return True
+    if entity_type == "conversation_session":
+        conversation = session.get(ConversationSession, entity_id)
+        if conversation is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"conversation_session not found: {entity_id}")
+        if conversation.user_id != actor_user_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="conversation_session does not belong to the current actor")
+        return True
+    if entity_type == "stablecoin_payout_link":
+        payout_row = session.execute(
+            select(StablecoinPayoutLink, FiatPaymentIntent)
+            .join(FiatPaymentIntent, FiatPaymentIntent.id == StablecoinPayoutLink.fiat_payment_intent_id)
+            .where(StablecoinPayoutLink.id == entity_id)
+            .limit(1)
+        ).one_or_none()
+        if payout_row is None or payout_row[1].merchant_id != actor_user_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="stablecoin_payout_link does not belong to the current actor")
+        return True
+    if entity_type == "platform_balance_lock":
+        lock_row = session.execute(
+            select(PlatformBalanceLock, PlatformBalanceAccount)
+            .join(PlatformBalanceAccount, PlatformBalanceAccount.id == PlatformBalanceLock.account_id)
+            .where(PlatformBalanceLock.id == entity_id)
+            .limit(1)
+        ).one_or_none()
+        if lock_row is None or lock_row[1].user_id != actor_user_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="platform_balance_lock does not belong to the current actor")
+        return True
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"audit entity type is not available to the current actor: {entity_type}",
+    )

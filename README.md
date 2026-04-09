@@ -312,4 +312,4 @@ It is not yet:
 
 ## License
 
-Add a project license before publishing publicly if the repository is intended for external reuse.
+This repository is licensed under Apache License 2.0. See [LICENSE](LICENSE).

@@ -8,7 +8,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import AuditLog, CommandExecution, PaymentOrder, PaymentSplit
+from app.db.models import AuditLog, CommandExecution, PaymentOrder, PaymentSplit, User
 from app.modules.command.lifecycle_schemas import (
     CommandReplayResponse,
     CommandTimelineItem,
@@ -209,11 +209,18 @@ def replay_command(session: Session, command_id: UUID) -> CommandReplayResponse:
             detail=f"command not found: {command_id}",
         )
 
-    beneficiaries = load_beneficiaries_for_lookup(session=session)
+    actor_user = session.get(User, command.user_id)
+    if actor_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"user not found: {command.user_id}",
+        )
+    beneficiaries = load_beneficiaries_for_lookup(session=session, actor_user=actor_user)
     intent = classify_intent(command.raw_text)
     parsed = parse_command(text=command.raw_text, intent=intent, beneficiaries=beneficiaries)
     preview_payload = build_command_preview_payload(
         session=session,
+        actor_user=actor_user,
         intent=intent,
         parsed=parsed,
         execution_mode="operator",

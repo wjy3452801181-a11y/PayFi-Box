@@ -1,7 +1,14 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.core.access import (
+    get_actor_user_id,
+    normalize_actor_scoped_user_id,
+    require_actor_matches_user_id,
+    require_fiat_payment_access,
+    require_quote_access,
+)
 from app.db.session import get_db_session
 from app.modules.merchant.schemas import (
     CreateStripeSessionRequest,
@@ -29,14 +36,33 @@ router = APIRouter(prefix="/api/merchant", tags=["merchant"])
 
 
 @router.post("/quote", response_model=SettlementQuoteResponse)
-def post_merchant_quote(request: SettlementQuoteRequest) -> SettlementQuoteResponse:
+def post_merchant_quote(
+    request: SettlementQuoteRequest,
+    actor_user_id: UUID = Depends(get_actor_user_id),
+) -> SettlementQuoteResponse:
     with get_db_session() as session:
+        require_actor_matches_user_id(
+            session=session,
+            actor_user_id=actor_user_id,
+            expected_user_id=request.merchant_id,
+            label="merchant_id",
+        )
         return create_settlement_quote(session=session, request=request)
 
 
 @router.post("/fiat-payment", response_model=CreateFiatPaymentResponse)
-def post_merchant_fiat_payment(request: CreateFiatPaymentRequest) -> CreateFiatPaymentResponse:
+def post_merchant_fiat_payment(
+    request: CreateFiatPaymentRequest,
+    actor_user_id: UUID = Depends(get_actor_user_id),
+) -> CreateFiatPaymentResponse:
     with get_db_session() as session:
+        require_actor_matches_user_id(
+            session=session,
+            actor_user_id=actor_user_id,
+            expected_user_id=request.merchant_id,
+            label="merchant_id",
+        )
+        require_quote_access(session=session, actor_user_id=actor_user_id, quote_id=request.quote_id)
         return create_fiat_payment_intent(session=session, request=request)
 
 
@@ -44,12 +70,20 @@ def post_merchant_fiat_payment(request: CreateFiatPaymentRequest) -> CreateFiatP
 def post_mark_fiat_received(
     fiat_payment_intent_id: UUID,
     request: MarkFiatReceivedRequest,
+    actor_user_id: UUID = Depends(get_actor_user_id),
 ) -> MarkFiatReceivedResponse:
     with get_db_session() as session:
+        require_fiat_payment_access(
+            session=session,
+            actor_user_id=actor_user_id,
+            fiat_payment_intent_id=fiat_payment_intent_id,
+        )
+        if request.confirmed_by_user_id is not None and request.confirmed_by_user_id != actor_user_id:
+            raise HTTPException(status_code=403, detail="confirmed_by_user_id does not match the current actor")
         return mark_fiat_received(
             session=session,
             fiat_payment_intent_id=fiat_payment_intent_id,
-            request=request,
+            request=request.model_copy(update={"confirmed_by_user_id": actor_user_id}),
         )
 
 
@@ -60,8 +94,14 @@ def post_mark_fiat_received(
 def post_create_stripe_session(
     fiat_payment_intent_id: UUID,
     request: CreateStripeSessionRequest | None = None,
+    actor_user_id: UUID = Depends(get_actor_user_id),
 ) -> CreateStripeSessionResponse:
     with get_db_session() as session:
+        require_fiat_payment_access(
+            session=session,
+            actor_user_id=actor_user_id,
+            fiat_payment_intent_id=fiat_payment_intent_id,
+        )
         return create_stripe_checkout_session(
             session=session,
             fiat_payment_intent_id=fiat_payment_intent_id,
@@ -76,8 +116,14 @@ def post_create_stripe_session(
 def post_start_stripe_payment(
     fiat_payment_intent_id: UUID,
     request: CreateStripeSessionRequest | None = None,
+    actor_user_id: UUID = Depends(get_actor_user_id),
 ) -> CreateStripeSessionResponse:
     with get_db_session() as session:
+        require_fiat_payment_access(
+            session=session,
+            actor_user_id=actor_user_id,
+            fiat_payment_intent_id=fiat_payment_intent_id,
+        )
         return create_stripe_checkout_session(
             session=session,
             fiat_payment_intent_id=fiat_payment_intent_id,
@@ -86,14 +132,30 @@ def post_start_stripe_payment(
 
 
 @router.get("/fiat-payment/{fiat_payment_intent_id}", response_model=MerchantFiatPaymentDetailResponse)
-def get_merchant_fiat_payment_detail(fiat_payment_intent_id: UUID) -> MerchantFiatPaymentDetailResponse:
+def get_merchant_fiat_payment_detail(
+    fiat_payment_intent_id: UUID,
+    actor_user_id: UUID = Depends(get_actor_user_id),
+) -> MerchantFiatPaymentDetailResponse:
     with get_db_session() as session:
+        require_fiat_payment_access(
+            session=session,
+            actor_user_id=actor_user_id,
+            fiat_payment_intent_id=fiat_payment_intent_id,
+        )
         return get_fiat_payment_detail(session=session, fiat_payment_intent_id=fiat_payment_intent_id)
 
 
 @router.post("/fiat-payment/{fiat_payment_intent_id}/sync-stripe-payment", response_model=MerchantFiatPaymentDetailResponse)
-def post_sync_stripe_payment(fiat_payment_intent_id: UUID) -> MerchantFiatPaymentDetailResponse:
+def post_sync_stripe_payment(
+    fiat_payment_intent_id: UUID,
+    actor_user_id: UUID = Depends(get_actor_user_id),
+) -> MerchantFiatPaymentDetailResponse:
     with get_db_session() as session:
+        require_fiat_payment_access(
+            session=session,
+            actor_user_id=actor_user_id,
+            fiat_payment_intent_id=fiat_payment_intent_id,
+        )
         return sync_stripe_payment_status(session=session, fiat_payment_intent_id=fiat_payment_intent_id)
 
 
@@ -102,11 +164,17 @@ def get_merchant_fiat_payments(
     merchant_id: UUID | None = None,
     status: str | None = None,
     limit: int = Query(default=20, ge=1, le=100),
+    actor_user_id: UUID = Depends(get_actor_user_id),
 ) -> MerchantFiatPaymentListResponse:
     with get_db_session() as session:
+        scoped_merchant_id = normalize_actor_scoped_user_id(
+            session=session,
+            actor_user_id=actor_user_id,
+            requested_user_id=merchant_id,
+        )
         return list_fiat_payments(
             session=session,
-            merchant_id=merchant_id,
+            merchant_id=scoped_merchant_id,
             status_value=status,
             limit=limit,
         )

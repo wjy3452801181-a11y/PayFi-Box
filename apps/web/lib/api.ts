@@ -1,4 +1,6 @@
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8000";
+const ACTOR_ID_STORAGE_KEY = "payfi_actor_id";
+const ACCESS_SESSION_STORAGE_KEY = "payfi_access_session";
 
 function resolveApiBaseUrl(): string {
   if (process.env.NEXT_PUBLIC_API_BASE_URL) {
@@ -12,10 +14,71 @@ function resolveApiBaseUrl(): string {
 
 export const API_BASE_URL = resolveApiBaseUrl();
 
+export function rememberActorId(actorId: string | null | undefined) {
+  if (typeof window === "undefined") return;
+  const normalized = actorId?.trim();
+  if (!normalized) {
+    window.localStorage.removeItem(ACTOR_ID_STORAGE_KEY);
+    return;
+  }
+  window.localStorage.setItem(ACTOR_ID_STORAGE_KEY, normalized);
+}
+
+export function getRememberedActorId(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(ACTOR_ID_STORAGE_KEY);
+}
+
+export type AccessSession = {
+  user: {
+    id: string;
+    name: string;
+    email: string;
+    role: string;
+    organization_id?: string | null;
+  };
+  access_token: string;
+  expires_at: string;
+};
+
+export function rememberAccessSession(session: AccessSession | null | undefined) {
+  if (typeof window === "undefined") return;
+  if (!session) {
+    window.localStorage.removeItem(ACCESS_SESSION_STORAGE_KEY);
+    window.localStorage.removeItem(ACTOR_ID_STORAGE_KEY);
+    return;
+  }
+  window.localStorage.setItem(ACCESS_SESSION_STORAGE_KEY, JSON.stringify(session));
+  rememberActorId(session.user.id);
+}
+
+export function getRememberedAccessSession(): AccessSession | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.localStorage.getItem(ACCESS_SESSION_STORAGE_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as AccessSession;
+    if (!parsed?.access_token || !parsed?.user?.id) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function getRememberedAccessToken(): string | null {
+  return getRememberedAccessSession()?.access_token || null;
+}
+
+export function clearRememberedAccessSession() {
+  rememberAccessSession(null);
+}
+
 type RequestOptions = {
   method?: "GET" | "POST" | "PATCH";
   body?: unknown;
   timeoutMs?: number;
+  actorId?: string | null;
+  accessToken?: string | null;
 };
 
 type ApiErrorPayload = {
@@ -28,11 +91,17 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
   const timeoutMs = options.timeoutMs ?? 45_000;
   const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
   let response: Response;
+  const actorId = options.actorId?.trim() || getRememberedActorId() || undefined;
+  const accessToken = options.accessToken?.trim() || getRememberedAccessToken() || undefined;
+  if (actorId) {
+    rememberActorId(actorId);
+  }
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
       method: options.method ?? "GET",
       headers: {
         "Content-Type": "application/json",
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       cache: "no-store",
@@ -69,6 +138,11 @@ export type CommandRequest = {
   text: string;
   channel?: string | null;
   locale?: string | null;
+};
+
+export type AccessSessionRequest = {
+  email: string;
+  access_code: string;
 };
 
 export type ConfirmRequest = {
@@ -686,12 +760,24 @@ export type BalancePaymentConfirmResponse = ConfirmResponse & {
   } | null;
 };
 
-export function postCommand(payload: CommandRequest): Promise<CommandResponse> {
-  return requestJson("/api/command", { method: "POST", body: payload });
+export function postAccessSession(payload: AccessSessionRequest): Promise<AccessSession> {
+  return requestJson("/api/auth/session", {
+    method: "POST",
+    body: payload,
+    accessToken: null,
+  });
 }
 
-export function postConfirm(payload: ConfirmRequest): Promise<ConfirmResponse> {
-  return requestJson("/api/confirm", { method: "POST", body: payload });
+export function postCommand(payload: CommandRequest): Promise<CommandResponse> {
+  return requestJson("/api/command", { method: "POST", body: payload, actorId: payload.user_id });
+}
+
+export function postConfirm(payload: ConfirmRequest, actorId?: string | null): Promise<ConfirmResponse> {
+  return requestJson("/api/confirm", {
+    method: "POST",
+    body: payload,
+    actorId: actorId || null,
+  });
 }
 
 export function postExecutionItemAttachTx(
@@ -702,10 +788,12 @@ export function postExecutionItemAttachTx(
     submitted_at?: string | null;
     locale?: string | null;
   },
+  actorId?: string | null,
 ): Promise<ExecutionItemActionResponse> {
   return requestJson(`/api/execution-items/${executionItemId}/attach-tx`, {
     method: "POST",
     body: payload,
+    actorId,
   });
 }
 
@@ -719,10 +807,12 @@ export function postExecutionItemAttachSafeProposal(
     proposal_payload?: Record<string, unknown> | null;
     submitted_at?: string | null;
   },
+  actorId?: string | null,
 ): Promise<ExecutionItemActionResponse> {
   return requestJson(`/api/execution-items/${executionItemId}/attach-safe-proposal`, {
     method: "POST",
     body: payload,
+    actorId,
   });
 }
 
@@ -731,10 +821,12 @@ export function postExecutionItemSyncReceipt(
   payload?: {
     force?: boolean;
   },
+  actorId?: string | null,
 ): Promise<ExecutionItemActionResponse> {
   return requestJson(`/api/execution-items/${executionItemId}/sync-receipt`, {
     method: "POST",
     body: payload ?? {},
+    actorId,
   });
 }
 
@@ -743,35 +835,35 @@ export function getPayments(params?: {
   risk_level?: string;
   beneficiary_name?: string;
   limit?: number;
-}): Promise<PaymentsListResponse> {
+}, actorId?: string | null): Promise<PaymentsListResponse> {
   const search = new URLSearchParams();
   if (params?.status) search.set("status", params.status);
   if (params?.risk_level) search.set("risk_level", params.risk_level);
   if (params?.beneficiary_name) search.set("beneficiary_name", params.beneficiary_name);
   if (params?.limit) search.set("limit", String(params.limit));
   const suffix = search.toString() ? `?${search.toString()}` : "";
-  return requestJson(`/api/payments${suffix}`);
+  return requestJson(`/api/payments${suffix}`, { actorId });
 }
 
-export function getPaymentDetail(paymentId: string): Promise<PaymentDetailResponse> {
-  return requestJson(`/api/payments/${paymentId}`);
+export function getPaymentDetail(paymentId: string, actorId?: string | null): Promise<PaymentDetailResponse> {
+  return requestJson(`/api/payments/${paymentId}`, { actorId });
 }
 
 export function getCommands(params?: {
   limit?: number;
   intent?: string;
   final_status?: string;
-}): Promise<CommandListResponse> {
+}, actorId?: string | null): Promise<CommandListResponse> {
   const search = new URLSearchParams();
   if (params?.limit) search.set("limit", String(params.limit));
   if (params?.intent) search.set("intent", params.intent);
   if (params?.final_status) search.set("final_status", params.final_status);
   const suffix = search.toString() ? `?${search.toString()}` : "";
-  return requestJson(`/api/commands${suffix}`);
+  return requestJson(`/api/commands${suffix}`, { actorId });
 }
 
-export function getCommandTimeline(commandId: string): Promise<CommandTimelineResponse> {
-  return requestJson(`/api/commands/${commandId}/timeline`);
+export function getCommandTimeline(commandId: string, actorId?: string | null): Promise<CommandTimelineResponse> {
+  return requestJson(`/api/commands/${commandId}/timeline`, { actorId });
 }
 
 export function getBeneficiaries(params?: {
@@ -801,7 +893,7 @@ export function postMerchantQuote(payload: {
   target_currency: string;
   target_network: string;
 }): Promise<SettlementQuoteResponse> {
-  return requestJson("/api/merchant/quote", { method: "POST", body: payload });
+  return requestJson("/api/merchant/quote", { method: "POST", body: payload, actorId: payload.merchant_id });
 }
 
 export function postCreateFiatPayment(payload: {
@@ -812,7 +904,7 @@ export function postCreateFiatPayment(payload: {
   source_text?: string | null;
   split_count?: number | null;
 }): Promise<CreateFiatPaymentResponse> {
-  return requestJson("/api/merchant/fiat-payment", { method: "POST", body: payload });
+  return requestJson("/api/merchant/fiat-payment", { method: "POST", body: payload, actorId: payload.merchant_id });
 }
 
 export function postMerchantKycStart(payload: {
@@ -822,11 +914,11 @@ export function postMerchantKycStart(payload: {
   locale?: string | null;
   force_new?: boolean;
 }): Promise<KycStartResponse> {
-  return requestJson("/api/kyc/start", { method: "POST", body: payload });
+  return requestJson("/api/kyc/start", { method: "POST", body: payload, actorId: payload.subject_id });
 }
 
-export function getKycVerification(kycVerificationId: string): Promise<KycStartResponse> {
-  return requestJson(`/api/kyc/${kycVerificationId}`);
+export function getKycVerification(kycVerificationId: string, actorId?: string | null): Promise<KycStartResponse> {
+  return requestJson(`/api/kyc/${kycVerificationId}`, { actorId });
 }
 
 export function postCreateStripeSession(
@@ -836,10 +928,12 @@ export function postCreateStripeSession(
     cancel_url?: string | null;
     locale?: string | null;
   },
+  actorId?: string | null,
 ): Promise<StripeSessionResponse> {
   return requestJson(`/api/merchant/fiat-payment/${fiatPaymentIntentId}/create-stripe-session`, {
     method: "POST",
     body: payload ?? {},
+    actorId,
   });
 }
 
@@ -850,19 +944,23 @@ export function postStartStripePayment(
     cancel_url?: string | null;
     locale?: string | null;
   },
+  actorId?: string | null,
 ): Promise<StripeSessionResponse> {
   return requestJson(`/api/merchant/fiat-payment/${fiatPaymentIntentId}/start-stripe-payment`, {
     method: "POST",
     body: payload ?? {},
+    actorId,
   });
 }
 
 export function postSyncStripePayment(
   fiatPaymentIntentId: string,
+  actorId?: string | null,
 ): Promise<MerchantFiatPaymentDetailResponse> {
   return requestJson(`/api/merchant/fiat-payment/${fiatPaymentIntentId}/sync-stripe-payment`, {
     method: "POST",
     body: {},
+    actorId,
   });
 }
 
@@ -878,22 +976,25 @@ export function postMarkFiatReceived(
     note?: string | null;
     demo_admin_override?: boolean;
   },
+  actorId?: string | null,
 ): Promise<MarkFiatReceivedResponse> {
   return requestJson(`/api/merchant/fiat-payment/${fiatPaymentIntentId}/mark-received`, {
     method: "POST",
     body: payload,
+    actorId,
   });
 }
 
 export function getMerchantFiatPaymentDetail(
   fiatPaymentIntentId: string,
+  actorId?: string | null,
 ): Promise<MerchantFiatPaymentDetailResponse> {
-  return requestJson(`/api/merchant/fiat-payment/${fiatPaymentIntentId}`);
+  return requestJson(`/api/merchant/fiat-payment/${fiatPaymentIntentId}`, { actorId });
 }
 
 export function getBalanceAccount(userId: string, currency = "USDT"): Promise<BalanceAccountResponse> {
   const search = new URLSearchParams({ currency });
-  return requestJson(`/api/balance/accounts/${userId}?${search.toString()}`);
+  return requestJson(`/api/balance/accounts/${userId}?${search.toString()}`, { actorId: userId });
 }
 
 export function getBalanceLedger(
@@ -904,7 +1005,7 @@ export function getBalanceLedger(
   if (params?.currency) search.set("currency", params.currency);
   if (params?.limit) search.set("limit", String(params.limit));
   const suffix = search.toString() ? `?${search.toString()}` : "";
-  return requestJson(`/api/balance/accounts/${userId}/ledger${suffix}`);
+  return requestJson(`/api/balance/accounts/${userId}/ledger${suffix}`, { actorId: userId });
 }
 
 export function postCreateBalanceDeposit(payload: {
@@ -914,11 +1015,14 @@ export function postCreateBalanceDeposit(payload: {
   target_currency: string;
   reference?: string | null;
 }): Promise<BalanceDepositResponse> {
-  return requestJson("/api/balance/deposits", { method: "POST", body: payload });
+  return requestJson("/api/balance/deposits", { method: "POST", body: payload, actorId: payload.user_id });
 }
 
-export function getBalanceDepositDetail(depositOrderId: string): Promise<BalanceDepositDetailResponse> {
-  return requestJson(`/api/balance/deposits/${depositOrderId}`);
+export function getBalanceDepositDetail(
+  depositOrderId: string,
+  actorId?: string | null,
+): Promise<BalanceDepositDetailResponse> {
+  return requestJson(`/api/balance/deposits/${depositOrderId}`, { actorId });
 }
 
 export function postStartBalanceDepositStripePayment(
@@ -928,19 +1032,23 @@ export function postStartBalanceDepositStripePayment(
     cancel_url?: string | null;
     locale?: string | null;
   },
+  actorId?: string | null,
 ): Promise<BalanceStartStripePaymentResponse> {
   return requestJson(`/api/balance/deposits/${depositOrderId}/start-stripe-payment`, {
     method: "POST",
     body: payload ?? {},
+    actorId,
   });
 }
 
 export function postSyncBalanceDepositStripePayment(
   depositOrderId: string,
+  actorId?: string | null,
 ): Promise<BalanceDepositDetailResponse> {
   return requestJson(`/api/balance/deposits/${depositOrderId}/sync-stripe-payment`, {
     method: "POST",
     body: {},
+    actorId,
   });
 }
 
@@ -953,6 +1061,7 @@ export function postBalancePaymentPreview(payload: {
   return requestJson("/api/balance/payments/preview", {
     method: "POST",
     body: payload,
+    actorId: payload.user_id,
   });
 }
 
@@ -967,5 +1076,6 @@ export function postBalancePaymentConfirm(payload: {
   return requestJson("/api/balance/payments/confirm", {
     method: "POST",
     body: payload,
+    actorId: payload.user_id,
   });
 }

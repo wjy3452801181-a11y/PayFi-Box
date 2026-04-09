@@ -2,7 +2,8 @@
 
 set -euo pipefail
 
-ROOT_DIR="${ROOT_DIR:-/Users/wangjiayi/Documents/New project/payfi-box}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+ROOT_DIR="${ROOT_DIR:-$(cd -- "$SCRIPT_DIR/.." && pwd)}"
 LOG_PATH="${WEB_LOG:-/tmp/payfi_web.log}"
 RESTART_DELAY="${WEB_RESTART_DELAY:-2}"
 WEB_PORT="${WEB_PORT:-3000}"

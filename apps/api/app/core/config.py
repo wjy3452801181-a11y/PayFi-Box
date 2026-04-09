@@ -1,4 +1,5 @@
 from functools import lru_cache
+from urllib.parse import urlparse
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -14,6 +15,9 @@ class Settings(BaseSettings):
     app_name: str = "PayFi Box API"
     app_env: str = "development"
     app_port: int = 8000
+    access_token_secret: str = "local-dev-access-token-secret-change-me"
+    access_code_pepper: str = "local-dev-access-code-pepper-change-me"
+    access_token_ttl_seconds: int = 60 * 60 * 24 * 7
     database_url: str = "postgresql://localhost:5432/payfi_box"
     database_echo: bool = False
     cors_allow_origins: list[str] = Field(
@@ -48,6 +52,12 @@ class Settings(BaseSettings):
     stripe_webhook_secret: str | None = None
     stripe_checkout_success_url: str = "http://localhost:3000/merchant?stripe=success"
     stripe_checkout_cancel_url: str = "http://localhost:3000/merchant?stripe=cancel"
+    stripe_checkout_allowed_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ]
+    )
     stripe_identity_return_url: str = "http://localhost:3000/merchant?kyc=done"
 
     @field_validator("cors_allow_origins", mode="before")
@@ -58,6 +68,15 @@ class Settings(BaseSettings):
         if isinstance(value, list):
             return value
         raise ValueError("CORS_ALLOW_ORIGINS must be a comma-separated string or list")
+
+    @field_validator("stripe_checkout_allowed_origins", mode="before")
+    @classmethod
+    def parse_stripe_checkout_allowed_origins(cls, value: object) -> list[str]:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        if isinstance(value, list):
+            return value
+        raise ValueError("STRIPE_CHECKOUT_ALLOWED_ORIGINS must be a comma-separated string or list")
 
     @model_validator(mode="after")
     def validate_hashkey_backend_requirements(self) -> "Settings":
@@ -71,6 +90,19 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "HASHKEY_OPERATOR_PRIVATE_KEY is required when PAYMENT_EXECUTION_BACKEND=hashkey_testnet"
                 )
+        allowed_origins = {item.rstrip("/") for item in self.stripe_checkout_allowed_origins if item.strip()}
+        for candidate in (self.stripe_checkout_success_url, self.stripe_checkout_cancel_url, self.stripe_identity_return_url):
+            parsed = urlparse(candidate)
+            origin = f"{parsed.scheme}://{parsed.netloc}".rstrip("/") if parsed.scheme and parsed.netloc else ""
+            if origin and origin not in allowed_origins:
+                raise ValueError(
+                    f"Stripe redirect origin {origin} must be present in STRIPE_CHECKOUT_ALLOWED_ORIGINS"
+                )
+        if (self.app_env or "").strip().lower() not in {"development", "local"}:
+            if self.access_token_secret == "local-dev-access-token-secret-change-me":
+                raise ValueError("ACCESS_TOKEN_SECRET must be overridden outside development")
+            if self.access_code_pepper == "local-dev-access-code-pepper-change-me":
+                raise ValueError("ACCESS_CODE_PEPPER must be overridden outside development")
         return self
 
     @property

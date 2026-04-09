@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.modules.auth.router import router as auth_router
 from app.modules.command.router import router as command_router
 from app.modules.confirm.router import router as confirm_router
 from app.modules.agent.router import router as agent_router
@@ -26,6 +27,7 @@ v1_router.include_router(risk_router)
 v1_router.include_router(agent_router)
 
 api_router.include_router(v1_router)
+api_router.include_router(auth_router)
 api_router.include_router(command_router)
 api_router.include_router(confirm_router)
 api_router.include_router(payments_router)

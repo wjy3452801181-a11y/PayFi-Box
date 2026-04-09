@@ -11,6 +11,7 @@ import {
   type SettlementQuoteResponse,
   type StripeSessionResponse,
   type TimelineItem,
+  getRememberedActorId,
   getKycVerification,
   getMerchantFiatPaymentDetail,
   postStartStripePayment,
@@ -22,6 +23,7 @@ import {
   postMarkFiatReceived,
   postMerchantQuote,
   postSyncStripePayment,
+  rememberActorId,
 } from "../../lib/api";
 import { formatAmount, formatTime } from "../../lib/format";
 import { useI18n } from "../../lib/i18n-provider";
@@ -317,7 +319,7 @@ function getMerchantCopilot(input: {
 
 export default function MerchantSettlementPage() {
   const { t, statusLabel, lang } = useI18n();
-  const [merchantId, setMerchantId] = useState("deaa3ed3-c910-53d0-8796-755d9c82add6");
+  const [merchantId, setMerchantId] = useState(() => getRememberedActorId() || "deaa3ed3-c910-53d0-8796-755d9c82add6");
   const [sourceCurrency, setSourceCurrency] = useState("USD");
   const [sourceAmount, setSourceAmount] = useState("500");
   const [targetCurrency, setTargetCurrency] = useState("USDT");
@@ -409,6 +411,10 @@ export default function MerchantSettlementPage() {
     executionMode,
   });
   const kycActionHref = kycVerification?.verification_url || "/merchant";
+
+  useEffect(() => {
+    rememberActorId(merchantId.trim() || null);
+  }, [merchantId]);
 
   const flowSteps: FlowStep[] = [
     {
@@ -547,7 +553,7 @@ export default function MerchantSettlementPage() {
       setKycResult(response);
       const fiatPaymentId = fiatIntentResult?.fiat_payment.id || detailResult?.fiat_payment.id;
       if (fiatPaymentId) {
-        const detail = await getMerchantFiatPaymentDetail(fiatPaymentId);
+        const detail = await getMerchantFiatPaymentDetail(fiatPaymentId, merchantId.trim());
         setDetailResult(detail);
       }
     } catch (err) {
@@ -595,7 +601,7 @@ export default function MerchantSettlementPage() {
         success_url: `${origin}/merchant?stripe=success&fiat_payment_id=${fiatPaymentId}`,
         cancel_url: `${origin}/merchant?stripe=cancel&fiat_payment_id=${fiatPaymentId}`,
         locale: lang === "zh" ? "zh" : "en",
-      });
+      }, merchantId.trim());
       setStripeSessionResult(response);
       const checkoutUrl = response.checkout?.checkout_url || response.fiat_payment?.channel_checkout_url;
       if (checkoutUrl) {
@@ -617,7 +623,7 @@ export default function MerchantSettlementPage() {
       setError(message);
       // Recover from transient request failures: backend may still have created the session.
       try {
-        const detail = await getMerchantFiatPaymentDetail(fiatPaymentId);
+        const detail = await getMerchantFiatPaymentDetail(fiatPaymentId, merchantId.trim());
         setDetailResult(detail);
         const recoveredCheckoutUrl = detail.fiat_payment?.channel_checkout_url;
         if (recoveredCheckoutUrl) {
@@ -666,12 +672,12 @@ export default function MerchantSettlementPage() {
         note: demoAdminOverride
           ? "admin manual override confirmation"
           : "manual receipt confirmation",
-      });
+      }, merchantId.trim());
       setMarkReceivedResult(response);
       setFiatPaymentIdInput(fiatPaymentId);
 
       try {
-        const detail = await getMerchantFiatPaymentDetail(fiatPaymentId);
+        const detail = await getMerchantFiatPaymentDetail(fiatPaymentId, merchantId.trim());
         setDetailResult(detail);
       } catch {
         // keep current flow visible even if detail refresh fails
@@ -701,8 +707,8 @@ export default function MerchantSettlementPage() {
     options?: { syncStripe?: boolean },
   ) {
     const response = options?.syncStripe
-      ? await postSyncStripePayment(fiatPaymentId)
-      : await getMerchantFiatPaymentDetail(fiatPaymentId);
+      ? await postSyncStripePayment(fiatPaymentId, merchantId.trim())
+      : await getMerchantFiatPaymentDetail(fiatPaymentId, merchantId.trim());
     setDetailResult(response);
     setFiatPaymentIdInput(fiatPaymentId);
     if (typeof window !== "undefined") {
@@ -731,7 +737,7 @@ export default function MerchantSettlementPage() {
       .finally(() => {
         window.history.replaceState({}, "", "/merchant");
       });
-  }, [t]);
+  }, [merchantId, t]);
 
   const activeFiatPaymentId = fiatPayment?.id || fiatIntentResult?.fiat_payment.id || null;
   const shouldPollDetail =
@@ -769,7 +775,7 @@ export default function MerchantSettlementPage() {
 
         if (shouldPollKyc && kycVerification?.id) {
           tasks.push(
-            getKycVerification(kycVerification.id).then((latest) => {
+            getKycVerification(kycVerification.id, merchantId.trim()).then((latest) => {
               if (!cancelled && latest.verification) setKycResult(latest);
             }),
           );
@@ -804,6 +810,7 @@ export default function MerchantSettlementPage() {
     activeFiatPaymentId,
     awaitingStripePayment,
     kycVerification?.id,
+    merchantId,
     shouldPollDetail,
     shouldPollKyc,
   ]);
@@ -820,7 +827,7 @@ export default function MerchantSettlementPage() {
         tx_hash: input.txHash,
         wallet_address: input.walletAddress || null,
         locale: lang === "zh" ? "zh-CN" : "en-US",
-      });
+      }, merchantId.trim());
       if (fiatPayment?.id) await loadDetailById(fiatPayment.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("common.error"));
@@ -844,7 +851,7 @@ export default function MerchantSettlementPage() {
         proposal_id: input.proposalId || null,
         proposal_url: input.proposalUrl || null,
         proposer_wallet: input.proposerWallet || null,
-      });
+      }, merchantId.trim());
       if (fiatPayment?.id) await loadDetailById(fiatPayment.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("common.error"));
@@ -857,7 +864,7 @@ export default function MerchantSettlementPage() {
     setLoading("sync_receipt");
     setError(null);
     try {
-      await postExecutionItemSyncReceipt(executionItemId, { force: false });
+      await postExecutionItemSyncReceipt(executionItemId, { force: false }, merchantId.trim());
       if (fiatPayment?.id) await loadDetailById(fiatPayment.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("common.error"));

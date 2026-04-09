@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -33,7 +33,7 @@ def handle_command(session: Session, request: CommandRequest) -> CommandResponse
         )
 
     conv_session = _resolve_or_create_session(session=session, request=request)
-    beneficiaries = load_beneficiaries_for_lookup(session=session)
+    beneficiaries = load_beneficiaries_for_lookup(session=session, actor_user=user)
 
     intent = classify_intent(request.text)
     parsed = parse_command(text=request.text, intent=intent, beneficiaries=beneficiaries)
@@ -41,6 +41,7 @@ def handle_command(session: Session, request: CommandRequest) -> CommandResponse
     preview_execution_mode = _normalize_preview_execution_mode(request.execution_mode)
     preview_payload = build_command_preview_payload(
         session=session,
+        actor_user=user,
         intent=intent,
         parsed=parsed,
         execution_mode=preview_execution_mode,
@@ -92,6 +93,7 @@ def handle_command(session: Session, request: CommandRequest) -> CommandResponse
 def build_command_preview_payload(
     *,
     session: Session,
+    actor_user: User,
     intent: str,
     parsed: dict[str, Any],
     execution_mode: str,
@@ -133,7 +135,7 @@ def build_command_preview_payload(
         }
     elif intent == "query_payments":
         filters = parsed["fields"]
-        sample = _sample_payments(session=session, filters=filters)
+        sample = _sample_payments(session=session, actor_user=actor_user, filters=filters)
         preview = {
             "type": "payment_query_preview",
             "filters": filters,
@@ -144,7 +146,7 @@ def build_command_preview_payload(
         message = "已解析查询条件，并生成轻量预览结果。 (Query filters parsed; lightweight preview generated.)"
         tool_calls.append({"tool": "payment_query_preview", "status": "ok"})
     elif intent == "generate_report":
-        report_preview = _build_report_preview(session=session, fields=parsed["fields"])
+        report_preview = _build_report_preview(session=session, actor_user=actor_user, fields=parsed["fields"])
         preview = {
             "type": "report_preview",
             "request": parsed["fields"],
@@ -264,14 +266,23 @@ def _resolve_or_create_session(session: Session, request: CommandRequest) -> Con
     return new_session
 
 
-def load_beneficiaries_for_lookup(session: Session) -> list[dict[str, Any]]:
+def _beneficiary_visibility_clause(actor_user: User):
+    if actor_user.organization_id is None:
+        return Beneficiary.organization_id.is_(None)
+    return or_(
+        Beneficiary.organization_id == actor_user.organization_id,
+        Beneficiary.organization_id.is_(None),
+    )
+
+
+def load_beneficiaries_for_lookup(session: Session, *, actor_user: User) -> list[dict[str, Any]]:
     stmt = select(
         Beneficiary.id,
         Beneficiary.name,
         Beneficiary.country,
         Beneficiary.risk_level,
         Beneficiary.is_blacklisted,
-    )
+    ).where(_beneficiary_visibility_clause(actor_user))
     rows = session.execute(stmt).all()
     return [
         {
@@ -285,19 +296,22 @@ def load_beneficiaries_for_lookup(session: Session) -> list[dict[str, Any]]:
     ]
 
 
-def _sample_payments(session: Session, filters: dict[str, Any]) -> dict[str, Any]:
+def _sample_payments(session: Session, *, actor_user: User, filters: dict[str, Any]) -> dict[str, Any]:
     conditions = []
 
     recipient = filters.get("recipient")
     if recipient:
-        subquery = select(Beneficiary.id).where(Beneficiary.name.ilike(f"%{recipient}%"))
+        subquery = select(Beneficiary.id).where(
+            Beneficiary.name.ilike(f"%{recipient}%"),
+            _beneficiary_visibility_clause(actor_user),
+        )
         conditions.append(PaymentOrder.beneficiary_id.in_(subquery))
 
     status_value = filters.get("status")
     if status_value:
         conditions.append(PaymentOrder.status == status_value)
 
-    query = select(PaymentOrder)
+    query = select(PaymentOrder).where(PaymentOrder.user_id == actor_user.id)
     if conditions:
         query = query.where(and_(*conditions))
 
@@ -319,17 +333,25 @@ def _sample_payments(session: Session, filters: dict[str, Any]) -> dict[str, Any
     return {"count": int(total), "items": items}
 
 
-def _build_report_preview(session: Session, fields: dict[str, Any]) -> dict[str, Any]:
-    total_orders = session.execute(select(func.count()).select_from(PaymentOrder)).scalar_one()
+def _build_report_preview(session: Session, *, actor_user: User, fields: dict[str, Any]) -> dict[str, Any]:
+    total_orders = session.execute(
+        select(func.count()).select_from(PaymentOrder).where(PaymentOrder.user_id == actor_user.id)
+    ).scalar_one()
     high_risk_orders = session.execute(
         select(func.count())
         .select_from(PaymentOrder)
-        .where(PaymentOrder.risk_level == RiskLevel.HIGH.value)
+        .where(
+            PaymentOrder.user_id == actor_user.id,
+            PaymentOrder.risk_level == RiskLevel.HIGH.value,
+        )
     ).scalar_one()
     cross_border_orders = session.execute(
         select(func.count())
         .select_from(PaymentOrder)
-        .where(PaymentOrder.currency.in_(("USD", "EUR", "USDT", "USDC")))
+        .where(
+            PaymentOrder.user_id == actor_user.id,
+            PaymentOrder.currency.in_(("USD", "EUR", "USDT", "USDC")),
+        )
     ).scalar_one()
 
     return {
