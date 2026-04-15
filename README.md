@@ -332,6 +332,7 @@ CI runs these checks on pull requests and pushes to the main branch.
 
 - Public product and repo entry: [README.md](README.md)
 - External one-pager: [docs/one-pager.md](docs/one-pager.md)
+- External FAQ: [docs/faq.md](docs/faq.md)
 - Internal demo runbook: [docs/demo-runbook.md](docs/demo-runbook.md)
 - Local development and internal demo notes: [docs/local-development.md](docs/local-development.md)
 - Production deployment checklist: [docs/production-deployment.md](docs/production-deployment.md)
